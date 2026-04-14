@@ -1,0 +1,235 @@
+# golangci-lint
+# Tested configuration that shows ALL problems
+
+version: "2"
+
+run:
+  timeout: 30m
+  tests: true
+  go: "1.25"
+
+linters:
+  default: none
+  disable: []
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - revive
+    - gosec
+    - gocyclo
+    - gocognit
+    - cyclop
+    - funlen
+    - nestif
+    - lll
+    - dupl
+    - goconst
+    - thelper
+    - gocritic
+    - misspell
+    - durationcheck
+    - nilerr
+    - errorlint
+    - bodyclose
+    - prealloc
+    - forbidigo
+    - gomoddirectives
+    - gomodguard
+    - nolintlint
+  exclusions:
+    presets: []
+    generated: lax
+    rules:
+      - path: _test\.go
+        linters:
+          - goconst
+  settings:
+    # ERRCHECK - check ALL errors
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    # GOSEC - maximum security
+    gosec:
+      severity: low
+      confidence: low
+
+    # GOVET - all checks
+    govet:
+      enable-all: true
+
+    # STATICCHECK
+    staticcheck:
+      checks: ["all"]
+
+    # REVIVE - working configuration
+    revive:
+      severity: warning
+      rules:
+        - name: exported
+          severity: warning
+        - name: var-naming
+          severity: warning
+        - name: package-comments
+          severity: warning
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: range
+        - name: receiver-naming
+        - name: indent-error-flow
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: bool-literal-in-expr
+        - name: constant-logical-expr
+
+    # GOCYCLO - reasonable complexity threshold
+    gocyclo:
+      min-complexity: 15
+
+    # GOCOGNIT - cognitive complexity
+    gocognit:
+      min-complexity: 20
+
+    # FUNLEN - reasonable function length
+    funlen:
+      lines: 65
+      statements: 40
+
+    # GOCONST - find constants
+    goconst:
+      min-len: 2
+      min-occurrences: 4
+
+    # GOMND - magic numbers
+    mnd:
+      checks:
+        - case
+        - return
+      ignored-numbers:
+        - "0"
+        - "1"
+        - "2"
+        - "3"
+        - "4"
+        - "5"
+        - "8"
+        - "10"
+        - "16"
+        - "32"
+        - "64"
+        - "100"
+        - "128"
+        - "256"
+        - "512"
+        - "1024"
+        - "2048"
+        - "4096"
+        - "65535"
+        - "2.0"
+        - "1000000000"
+        - "1000000000.0"
+
+    # GOCRITIC - enable all checks
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - experimental
+        - opinionated
+
+    lll:
+      line-length: 120
+
+    misspell:
+      locale: US
+
+    nakedret:
+      max-func-lines: 5
+
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: true
+
+    dupl:
+      threshold: 150
+
+    # WHITESPACE
+    whitespace:
+      multi-if: true
+      multi-func: true
+
+    # WSL - whitespace linter
+    wsl:
+      allow-assign-and-anything: false
+      allow-multiline-assign: false
+      allow-cuddle-declarations: false
+      allow-trailing-comment: false
+      force-case-trailing-whitespace: 3
+
+    # GODOT - comments with period
+    godot:
+      scope: all
+      period: true
+      capital: true
+
+    # GODOX - TODO/FIXME
+    godox:
+      keywords:
+        - TODO
+        - BUG
+        - FIXME
+        - HACK
+        - XXX
+
+    # EXHAUSTIVE
+    exhaustive:
+      default-signifies-exhaustive: false
+
+    # NOLINTLINT
+    nolintlint:
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
+
+    # UNPARAM
+    unparam:
+      check-exported: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/
+
+issues:
+  # No limits
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  formats:
+    text: {}
+  sort-order:
+    - linter
+    - file
+  show-stats: true

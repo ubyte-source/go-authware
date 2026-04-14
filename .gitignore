@@ -1,0 +1,18 @@
+# Go build & test artifacts
+*.test
+*.prof
+*.out
+coverage.*
+
+# Go fuzz cache
+testdata/fuzz/
+
+# OS artifacts
+.DS_Store
+
+# IDE / editor directories
+.vscode/
+.idea/
+
+# Environment files
+*.env
