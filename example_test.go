@@ -3,6 +3,7 @@ package authware_test
 import (
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 
@@ -127,6 +128,27 @@ func ExampleConfigFromEnv() {
 
 	fmt.Println(id.Method)
 	// Output: none
+}
+
+func ExampleNewOAuthProxy() {
+	proxy := authware.NewOAuthProxy(&authware.Config{
+		OAuthAuthorizationServers: []string{"https://login.microsoftonline.com/tenant/v2.0"},
+		OAuthClientID:             "my-client-id",
+	}, slog.Default())
+
+	if proxy != nil {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
+		mux.HandleFunc("/oauth/register", proxy.RegisterHandler())
+		mux.HandleFunc("/oauth/token", proxy.TokenHandler())
+
+		// Test the DCR shim returns the pre-configured client_id.
+		r := httptest.NewRequest(http.MethodPost, "/oauth/register", http.NoBody)
+		w := httptest.NewRecorder()
+		proxy.RegisterHandler().ServeHTTP(w, r)
+		fmt.Println(w.Code)
+	}
+	// Output: 201
 }
 
 func ExampleAuthCheckHandler() {

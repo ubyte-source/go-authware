@@ -10,16 +10,20 @@
 
 ## Features
 
-- **Four auth modes**: None, Bearer, API Key, OAuth/JWT
+- **Five auth modes**: None, Bearer, API Key, OAuth/JWT, OAuth Proxy
 - **OIDC auto-discovery** — works with any OpenID Connect provider
-- **Minimal dependencies** — stdlib + [go-jsonfast](https://github.com/ubyte-source/go-jsonfast) for zero-alloc JSON parsing
+- **Minimal dependencies** — stdlib + [go-jsonfast](https://github.com/ubyte-source/go-jsonfast) for zero-alloc JSON
 - **Constant-time comparisons** via `crypto/subtle` on all secret paths
 - **JWT/JWKS support**: HMAC-SHA256/384/512, RSA (PKCS1v15 + PSS), ECDSA (P-256/384/521)
 - **JWKS auto-refresh** with cache TTL and stampede prevention
 - **RFC 9728** Protected Resource Metadata
+- **RFC 8414** AS Metadata via OAuth proxy
+- **RFC 7591** Dynamic Client Registration shim
 - **Zero-alloc hot paths** using `unsafe.Slice` for string→[]byte views
+- **go-jsonfast Builder** for zero-alloc JSON serialization in proxy handlers
 - **Nginx auth_request** compatible handler
 - **Environment variable configuration** via `ConfigFromEnv`
+- **PGO-optimized** with `default.pgo` profile
 
 ## Install
 
@@ -111,6 +115,36 @@ auth, err := authware.New(&authware.Config{
 }, nil)
 ```
 
+## OAuth Proxy (MCP 3/26)
+
+The `OAuthProxy` bridges MCP clients (e.g. Claude Desktop) that require
+RFC 7591 Dynamic Client Registration and public-client auth with upstream
+IdPs (e.g. Azure AD, Okta) that don't natively support them.
+
+It provides three HTTP handlers:
+
+- **`ASMetadataHandler`** — serves `/.well-known/oauth-authorization-server`
+  with a custom RFC 8414 metadata document (fetched once, cached)
+- **`RegisterHandler`** — minimal RFC 7591 DCR shim returning a pre-configured
+  `client_id`
+- **`TokenHandler`** — proxies token exchange requests to the upstream IdP
+
+```go
+proxy := authware.NewOAuthProxy(&authware.Config{
+    OAuthAuthorizationServers: []string{"https://login.microsoftonline.com/tenant/v2.0"},
+    OAuthClientID:             "my-app-client-id",
+}, slog.Default())
+
+if proxy != nil {
+    mux.HandleFunc("/.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
+    mux.HandleFunc("/oauth/register", proxy.RegisterHandler())
+    mux.HandleFunc("/oauth/token", proxy.TokenHandler())
+}
+```
+
+All proxy JSON serialization uses [go-jsonfast](https://github.com/ubyte-source/go-jsonfast)
+`Builder` with pooled buffers — zero `encoding/json.Marshal` calls on the hot path.
+
 ## Nginx auth_request
 
 The `AuthCheckHandler` returns an `http.Handler` compatible with nginx's
@@ -163,6 +197,29 @@ auth, err := authware.New(cfg, nil)
 | `apikey` | `APIKey`, `APIKeyHeader` | Static key in custom header or `Authorization: ApiKey <key>` |
 | `oauth` | `OAuthIssuer` + optional fields | Full JWT validation with JWKS / OIDC discovery |
 
+## Benchmarks
+
+Measured on Intel Xeon Gold 6426Y (32 cores):
+
+| Benchmark | ns/op | B/op | allocs/op |
+|-----------|------:|-----:|----------:|
+| Bearer (accept) | 19 | 0 | 0 |
+| Bearer (reject) | 10 | 0 | 0 |
+| API Key | 23 | 0 | 0 |
+| API Key (Authorization header) | 37 | 0 | 0 |
+| None | 4 | 0 | 0 |
+| OAuth HMAC HS256 | 1086 | 24 | 1 |
+| Scope check | 33 | 0 | 0 |
+| Secure equal | 22 | 0 | 0 |
+| Proxy: Register (DCR) | 4356 | 6475 | 22 |
+| Proxy: AS Metadata (cached) | 2874 | 6533 | 19 |
+| Proxy: Token | 85083 | 50920 | 120 |
+| Middleware (Bearer) | 361 | 624 | 7 |
+
+Hot paths (Bearer, API Key, None, Scope check, Secure equal) are **zero-allocation**.
+OAuth HMAC has a single allocation for the HMAC hash buffer reuse.
+Proxy handlers use pooled go-jsonfast builders.
+
 ## 📁 Project Structure
 
 ```
@@ -174,10 +231,13 @@ go-authware/
 ├── none.go             # Pass-through authenticator
 ├── jwt.go              # OAuth/JWT validation with JWKS auto-discovery
 ├── oidc.go             # OIDC auto-discovery
+├── proxy.go            # OAuth proxy (AS metadata, DCR shim, token proxy)
 ├── challenge.go        # HTTP challenge/error response formatting
 ├── handler.go          # Nginx auth_request handler
 ├── env.go              # Environment variable configuration
 ├── doc.go              # Package documentation
+├── bench_test.go       # Performance benchmarks (12 benchmarks)
+├── default.pgo         # PGO profile for build optimization
 ├── .golangci.yml       # Ultra-strict linter config (27 linters)
 ├── Makefile            # Build, test, bench, lint
 ├── CONTRIBUTING.md     # Contribution guidelines

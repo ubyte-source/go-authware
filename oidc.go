@@ -23,12 +23,12 @@ type oidcConfiguration struct {
 // {issuer}/.well-known/openid-configuration and returns the parsed configuration.
 func discoverOIDC(ctx context.Context, client *http.Client, issuer string) (_ *oidcConfiguration, err error) {
 	endpoint := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
-	//nolint:gosec // G704: endpoint is derived from operator-configured issuer, never from request input
+	//nolint:gosec // G107: endpoint is derived from operator-configured issuer, never from request input
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if reqErr != nil {
 		return nil, reqErr
 	}
-	resp, err := client.Do(req) //nolint:gosec // G704: URL is operator-configured (see NewRequestWithContext above)
+	resp, err := client.Do(req) //nolint:gosec // G107: req built from operator-configured issuer URL
 	if err != nil {
 		return nil, err
 	}

@@ -18,6 +18,8 @@
 //   - Automatic JWKS key rotation with cache TTL
 //   - Stampede prevention via serialized refresh with double-check
 //   - RFC 9728 Protected Resource Metadata
+//   - RFC 8414 AS Metadata via OAuth proxy
+//   - RFC 7591 Dynamic Client Registration shim
 //   - Scope validation (scope and scp claims)
 //   - Clock skew tolerance for nbf/iat claims
 //
@@ -65,9 +67,22 @@
 //	auth, err := authware.New(cfg, nil)
 //	id, err := auth.Authenticate(r)
 //
+// # OAuth Proxy
+//
+// OAuthProxy bridges MCP clients (e.g. Claude Desktop) with upstream IdPs
+// that don't support RFC 7591 Dynamic Client Registration. It provides
+// three handlers: ASMetadataHandler, RegisterHandler, and TokenHandler.
+// All proxy JSON serialization uses go-jsonfast Builder with pooled buffers.
+//
+//	proxy := authware.NewOAuthProxy(cfg, slog.Default())
+//	mux.HandleFunc("/.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
+//	mux.HandleFunc("/oauth/register", proxy.RegisterHandler())
+//	mux.HandleFunc("/oauth/token", proxy.TokenHandler())
+//
 // # Dependencies
 //
 // This library depends only on go-jsonfast
 // (https://github.com/ubyte-source/go-jsonfast) for zero-allocation JWT
-// claims parsing. No other external modules are required.
+// claims parsing and proxy JSON serialization. No other external modules
+// are required.
 package authware

@@ -16,11 +16,9 @@ type Config struct {
 	OAuthResource              string
 	OAuthResourceDocumentation string
 	OAuthResourceName          string
-
-	OAuthRequiredScopes       []string
-	OAuthAuthorizationServers []string
-
-	OAuthClientID string // upstream IdP client_id returned by the built-in DCR shim
+	OAuthClientID              string // upstream IdP client_id returned by the built-in DCR shim
+	OAuthRequiredScopes        []string
+	OAuthAuthorizationServers  []string
 }
 
 // Identity describes the authenticated caller.

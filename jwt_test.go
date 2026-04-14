@@ -51,8 +51,14 @@ func signRSAToken(
 ) string {
 	t.Helper()
 	header := map[string]any{"alg": "RS256", "typ": "JWT", "kid": kid}
-	headerJSON, _ := json.Marshal(header) //nolint:errcheck // test
-	claimsJSON, _ := json.Marshal(claims) //nolint:errcheck // test
+	headerJSON, err := json.Marshal(header)
+	if err != nil {
+		t.Fatalf("marshal header: %v", err)
+	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
 	enc := base64.RawURLEncoding
 	signingInput := enc.EncodeToString(headerJSON) + "." + enc.EncodeToString(claimsJSON)
 
@@ -75,7 +81,9 @@ func rsaJWKSHandler(t *testing.T, key *rsa.PublicKey, kid string) http.HandlerFu
 			E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
 		}}}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(set) //nolint:errcheck,gosec // test
+		if err := json.NewEncoder(w).Encode(set); err != nil {
+			t.Errorf("encode JWKS: %v", err)
+		}
 	}
 }
 
@@ -349,8 +357,14 @@ func TestOAuth_HMACAlgorithms(t *testing.T) {
 				"sub": "user", "iss": "https://issuer.example.com",
 				"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
 			}
-			headerJSON, _ := json.Marshal(header) //nolint:errcheck // test
-			claimsJSON, _ := json.Marshal(claims) //nolint:errcheck // test
+			headerJSON, hErr := json.Marshal(header)
+			if hErr != nil {
+				t.Fatalf("marshal header: %v", hErr)
+			}
+			claimsJSON, cErr := json.Marshal(claims)
+			if cErr != nil {
+				t.Fatalf("marshal claims: %v", cErr)
+			}
 			enc := base64.RawURLEncoding
 			signingInput := enc.EncodeToString(headerJSON) + "." + enc.EncodeToString(claimsJSON)
 			mac := hmac.New(tc.hasher, []byte("secret"))
@@ -575,8 +589,14 @@ func TestOAuth_JWKS_RSA(t *testing.T) {
 }
 
 func TestOAuth_JWKS_RSA_WrongKey(t *testing.T) {
-	signKey, _ := rsa.GenerateKey(rand.Reader, 2048)  //nolint:errcheck // test
-	otherKey, _ := rsa.GenerateKey(rand.Reader, 2048) //nolint:errcheck // test
+	signKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate sign key: %v", err)
+	}
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate other key: %v", err)
+	}
 
 	jwksServer := httptest.NewServer(rsaJWKSHandler(t, &otherKey.PublicKey, "wrong-kid"))
 	defer jwksServer.Close()
@@ -617,7 +637,9 @@ func TestOAuth_JWKS_EC(t *testing.T) {
 	}}}
 	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(set) //nolint:errcheck,gosec // test
+		if encErr := json.NewEncoder(w).Encode(set); encErr != nil {
+			t.Errorf("encode JWKS: %v", encErr)
+		}
 	}))
 	defer jwksServer.Close()
 
@@ -627,8 +649,14 @@ func TestOAuth_JWKS_EC(t *testing.T) {
 		"sub": "ec-user", "iss": "https://issuer.example.com",
 		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
 	}
-	headerJSON, _ := json.Marshal(header) //nolint:errcheck // test
-	claimsJSON, _ := json.Marshal(claims) //nolint:errcheck // test
+	headerJSON, err := json.Marshal(header)
+	if err != nil {
+		t.Fatalf("marshal header: %v", err)
+	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
 	signingInput := enc.EncodeToString(headerJSON) + "." + enc.EncodeToString(claimsJSON)
 	digest := sha256.Sum256([]byte(signingInput))
 	sig, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
@@ -686,7 +714,9 @@ func TestOAuth_JWKS_ServerError(t *testing.T) {
 func TestOAuth_JWKS_UnsupportedKeyType(t *testing.T) {
 	set := jwkSet{Keys: []jwk{{Kty: "OKP", Kid: "ed-key"}}}
 	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(set) //nolint:errcheck,gosec // test
+		if encErr := json.NewEncoder(w).Encode(set); encErr != nil {
+			t.Errorf("encode: %v", encErr)
+		}
 	}))
 	defer jwksServer.Close()
 
@@ -716,7 +746,9 @@ func TestOAuth_JWKS_UnsupportedKeyType(t *testing.T) {
 func TestOAuth_JWKS_NoMatchingKey(t *testing.T) {
 	set := jwkSet{Keys: []jwk{}}
 	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(set) //nolint:errcheck,gosec // test
+		if encErr := json.NewEncoder(w).Encode(set); encErr != nil {
+			t.Errorf("encode: %v", encErr)
+		}
 	}))
 	defer jwksServer.Close()
 
@@ -754,7 +786,9 @@ func TestOAuth_JWKS_PSS_FullFlow(t *testing.T) {
 		E: base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
 	}}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(set) //nolint:errcheck,gosec // test
+		if encErr := json.NewEncoder(w).Encode(set); encErr != nil {
+			t.Errorf("encode JWKS: %v", encErr)
+		}
 	}))
 	defer srv.Close()
 
@@ -764,8 +798,14 @@ func TestOAuth_JWKS_PSS_FullFlow(t *testing.T) {
 		"sub": "pss-user", "iss": "https://issuer.example.com",
 		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
 	}
-	headerJSON, _ := json.Marshal(header) //nolint:errcheck // test
-	claimsJSON, _ := json.Marshal(claims) //nolint:errcheck // test
+	headerJSON, err := json.Marshal(header)
+	if err != nil {
+		t.Fatalf("marshal header: %v", err)
+	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
 	enc := base64.RawURLEncoding
 	signingInput := enc.EncodeToString(headerJSON) + "." + enc.EncodeToString(claimsJSON)
 	digest := sha256.Sum256([]byte(signingInput))
@@ -947,24 +987,30 @@ func TestVerifyJWKS_UnsupportedPublicKeyType(t *testing.T) {
 }
 
 func TestVerifyJWKS_HashJWTError(t *testing.T) {
-	key, _ := rsa.GenerateKey(rand.Reader, 2048) //nolint:errcheck // test
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
 	a := &oauthAuthenticator{
 		keys:       map[string]jwkPublicKey{"kid": {key: &key.PublicKey, alg: ""}},
 		keysExpiry: time.Now().Add(5 * time.Minute),
 	}
-	err := a.verifyJWKS(context.Background(), "XX999", "kid", []byte("h.p"), []byte("sig"), make([]byte, 64))
+	err = a.verifyJWKS(context.Background(), "XX999", "kid", []byte("h.p"), []byte("sig"), make([]byte, 64))
 	if err == nil || !strings.Contains(err.Error(), "unsupported JWT algorithm") {
 		t.Fatalf("expected unsupported alg error, got %v", err)
 	}
 }
 
 func TestVerifyJWKS_ECVerifyFailure(t *testing.T) {
-	ecKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader) //nolint:errcheck // test
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate EC key: %v", err)
+	}
 	a := &oauthAuthenticator{
 		keys:       map[string]jwkPublicKey{"ec-kid": {key: &ecKey.PublicKey, alg: "ES256"}},
 		keysExpiry: time.Now().Add(5 * time.Minute),
 	}
-	err := a.verifyJWKS(context.Background(), "ES256", "ec-kid", []byte("h.p"), []byte("bad-sig"), make([]byte, 64))
+	err = a.verifyJWKS(context.Background(), "ES256", "ec-kid", []byte("h.p"), []byte("bad-sig"), make([]byte, 64))
 	if err == nil || !strings.Contains(err.Error(), "invalid JWT signature") {
 		t.Fatalf("expected signature verify error, got %v", err)
 	}
@@ -1008,7 +1054,10 @@ func TestDecodeBase64Int_Invalid(t *testing.T) {
 
 func TestParseJWTHeaderDirect_LargePayload(t *testing.T) {
 	hdr := map[string]any{"alg": "RS256", "kid": "big", "extra": strings.Repeat("x", 200)}
-	hdrJSON, _ := json.Marshal(hdr) //nolint:errcheck // test
+	hdrJSON, mErr := json.Marshal(hdr)
+	if mErr != nil {
+		t.Fatalf("marshal: %v", mErr)
+	}
 	encoded := []byte(base64.RawURLEncoding.EncodeToString(hdrJSON))
 	h, err := parseJWTHeaderDirect(encoded)
 	if err != nil {
@@ -1051,7 +1100,10 @@ func TestValidateToken_InvalidClaimsJSON(t *testing.T) {
 }
 
 func TestRefreshKeys_DoubleCheck(t *testing.T) {
-	key, _ := rsa.GenerateKey(rand.Reader, 2048) //nolint:errcheck // test
+	key, genErr := rsa.GenerateKey(rand.Reader, 2048)
+	if genErr != nil {
+		t.Fatalf("generate key: %v", genErr)
+	}
 	a := &oauthAuthenticator{
 		httpClient: http.DefaultClient,
 		keys:       map[string]jwkPublicKey{"kid": {key: &key.PublicKey, alg: "RS256"}},
@@ -1080,7 +1132,9 @@ func TestRefreshKeys_Non200(t *testing.T) {
 func TestRefreshKeys_JSONDecodeError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, "not json{{{") //nolint:errcheck // test
+		if _, fErr := fmt.Fprint(w, "not json{{{"); fErr != nil {
+			t.Errorf("fprint: %v", fErr)
+		}
 	}))
 	defer srv.Close()
 	a := &oauthAuthenticator{httpClient: srv.Client(), jwksURL: srv.URL}
@@ -1092,7 +1146,9 @@ func TestRefreshKeys_JSONDecodeError(t *testing.T) {
 func TestRefreshKeys_ParseJWKSError(t *testing.T) {
 	set := jwkSet{Keys: []jwk{{Kty: "UNSUPPORTED"}}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(set) //nolint:errcheck,gosec // test
+		if encErr := json.NewEncoder(w).Encode(set); encErr != nil {
+			t.Errorf("encode: %v", encErr)
+		}
 	}))
 	defer srv.Close()
 	a := &oauthAuthenticator{httpClient: srv.Client(), jwksURL: srv.URL}
@@ -1119,15 +1175,20 @@ func TestRefreshKeys_DoError(t *testing.T) {
 
 func TestRefreshKeys_OIDCDiscovery(t *testing.T) {
 	// When jwksURL is empty, refreshKeys should discover via OIDC.
-	key, _ := rsa.GenerateKey(rand.Reader, 2048) //nolint:errcheck // test
+	key, genErr := rsa.GenerateKey(rand.Reader, 2048)
+	if genErr != nil {
+		t.Fatalf("generate key: %v", genErr)
+	}
 	kid := "disc-kid"
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck,gosec // test
+		if encErr := json.NewEncoder(w).Encode(map[string]any{
 			"issuer":   "https://issuer.example.com",
 			"jwks_uri": "http://" + r.Host + "/jwks",
-		})
+		}); encErr != nil {
+			t.Errorf("encode: %v", encErr)
+		}
 	})
 	mux.HandleFunc("/jwks", rsaJWKSHandler(t, &key.PublicKey, kid))
 	srv := httptest.NewServer(mux)
@@ -1159,7 +1220,10 @@ func TestRefreshKeys_OIDCDiscoveryFailure(t *testing.T) {
 }
 
 func TestCurrentKeys_CacheHit(t *testing.T) {
-	key, _ := rsa.GenerateKey(rand.Reader, 2048) //nolint:errcheck // test
+	key, genErr := rsa.GenerateKey(rand.Reader, 2048)
+	if genErr != nil {
+		t.Fatalf("generate key: %v", genErr)
+	}
 	a := &oauthAuthenticator{
 		httpClient: http.DefaultClient,
 		keys:       map[string]jwkPublicKey{"kid": {key: &key.PublicKey, alg: "RS256"}},
@@ -1233,10 +1297,12 @@ func TestOAuth_OIDC_AutoDiscovery(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck,gosec // test
+		if encErr := json.NewEncoder(w).Encode(map[string]any{
 			"issuer":   "https://issuer.example.com",
 			"jwks_uri": "http://" + r.Host + "/jwks",
-		})
+		}); encErr != nil {
+			t.Errorf("encode: %v", encErr)
+		}
 	})
 	mux.HandleFunc("/jwks", rsaJWKSHandler(t, &key.PublicKey, kid))
 	srv := httptest.NewServer(mux)
@@ -1257,7 +1323,10 @@ func TestOAuth_OIDC_AutoDiscovery(t *testing.T) {
 	}
 
 	// Override issuer URL for test server (the authenticator uses issuer for OIDC discovery).
-	oa, _ := a.(*oauthAuthenticator) //nolint:errcheck // test type assertion
+	oa, ok := a.(*oauthAuthenticator)
+	if !ok {
+		t.Fatal("expected *oauthAuthenticator")
+	}
 	oa.issuer = srv.URL
 	// Keep the expected issuer for claim validation.
 	origIssuer := "https://issuer.example.com"

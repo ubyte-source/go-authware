@@ -4,12 +4,15 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ubyte-source/go-jsonfast"
 )
 
 // makeHS256Token creates a minimal valid HS256 JWT for benchmarks.
@@ -17,16 +20,18 @@ func makeHS256Token(b *testing.B, issuer, secret string) string {
 	b.Helper()
 	now := time.Now()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	claims, _ := json.Marshal(map[string]any{ //nolint:errcheck // bench
-		"sub":   "bench-user",
-		"iss":   issuer,
-		"aud":   "bench",
-		"scope": "read write",
-		"iat":   now.Unix(),
-		"nbf":   now.Add(-time.Minute).Unix(),
-		"exp":   now.Add(time.Hour).Unix(),
-	})
-	payload := base64.RawURLEncoding.EncodeToString(claims)
+	cb := jsonfast.Acquire()
+	cb.BeginObject()
+	cb.AddStringField("sub", "bench-user")
+	cb.AddStringField("iss", issuer)
+	cb.AddStringField("aud", "bench")
+	cb.AddStringField("scope", "read write")
+	cb.AddInt64Field("iat", now.Unix())
+	cb.AddInt64Field("nbf", now.Add(-time.Minute).Unix())
+	cb.AddInt64Field("exp", now.Add(time.Hour).Unix())
+	cb.EndObject()
+	payload := base64.RawURLEncoding.EncodeToString(cb.Bytes())
+	jsonfast.Release(cb)
 	signingInput := header + "." + payload
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(signingInput))
@@ -168,6 +173,86 @@ func BenchmarkSecureEqual(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		_ = secureEqual(a, c)
+	}
+}
+
+// BenchmarkProxy_RegisterHandler measures the DCR shim handler throughput.
+func BenchmarkProxy_RegisterHandler(b *testing.B) {
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{"https://example.com"},
+		OAuthClientID:             "bench-client",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := p.RegisterHandler()
+	body := `{"client_name":"bench"}`
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/oauth/register", strings.NewReader(body))
+		handler.ServeHTTP(rec, req)
+	}
+}
+
+// BenchmarkProxy_ASMetadata measures AS metadata handler throughput (cached path).
+func BenchmarkProxy_ASMetadata(b *testing.B) {
+	fakeAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{` +
+			`"issuer":"https://fake.example.com",` +
+			`"authorization_endpoint":"https://fake.example.com/authorize",` +
+			`"token_endpoint":"https://fake.example.com/token"}`)); err != nil {
+			b.Errorf("write: %v", err)
+		}
+	}))
+	defer fakeAS.Close()
+
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{fakeAS.URL},
+		OAuthClientID:             "bench-client",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	handler := p.ASMetadataHandler()
+	// Warm up the cache (sync.Once).
+	warmup := httptest.NewRecorder()
+	handler.ServeHTTP(warmup, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	if warmup.Code != http.StatusOK {
+		b.Fatalf("warmup failed: %d", warmup.Code)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	}
+}
+
+// BenchmarkProxy_TokenHandler measures the token proxy handler throughput.
+func BenchmarkProxy_TokenHandler(b *testing.B) {
+	fakeToken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"access_token":"t","token_type":"Bearer"}`)); err != nil {
+			b.Errorf("write: %v", err)
+		}
+	}))
+	defer fakeToken.Close()
+
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{"https://example.com"},
+		OAuthClientID:             "bench-client",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p.upstreamTokenEndpoint = fakeToken.URL
+
+	handler := p.TokenHandler()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/oauth/token",
+			strings.NewReader("grant_type=authorization_code&code=bench"))
+		handler.ServeHTTP(rec, req)
 	}
 }
 

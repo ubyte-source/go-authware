@@ -715,12 +715,12 @@ func (a *oauthAuthenticator) refreshKeys(ctx context.Context) (_ map[string]jwkP
 
 // fetchAndParseJWKS fetches the JWKS endpoint and parses the key set.
 func (a *oauthAuthenticator) fetchAndParseJWKS(ctx context.Context) (_ map[string]jwkPublicKey, err error) {
-	//nolint:gosec // G704: a.jwksURL is operator-configured, never derived from request input
+	//nolint:gosec // G107: a.jwksURL is operator-configured, never derived from request input
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, a.jwksURL, http.NoBody)
 	if reqErr != nil {
 		return nil, reqErr
 	}
-	resp, err := a.httpClient.Do(req) //nolint:gosec // G704: URL is operator-configured (see NewRequestWithContext above)
+	resp, err := a.httpClient.Do(req) //nolint:gosec // G107: req built from operator-configured jwksURL
 	if err != nil {
 		return nil, err
 	}
