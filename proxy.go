@@ -15,19 +15,19 @@ import (
 
 const proxyFetchTimeout = 10 * time.Second
 
-// OAuthProxy provides HTTP handlers for the MCP 3/26 OAuth facade.
+// OAuthProxy provides HTTP handlers for the MCP 2025-03-26 OAuth facade.
 // It handles AS metadata discovery, Dynamic Client Registration (DCR) shim,
-// and token endpoint proxying. This bridges MCP clients (e.g. Claude)
-// that require DCR and public-client auth with upstream IdPs (e.g. Azure AD)
-// that don't natively support them.
+// authorization redirect, and token endpoint proxying. This bridges MCP
+// clients that require public-client OAuth with upstream IdPs that don't
+// natively support RFC 7591 DCR.
 type OAuthProxy struct {
 	log                   *slog.Logger
 	clientID              string
 	upstreamTokenEndpoint string
 	upstreamAuthzEndpoint string
-	cachedMetadata        json.RawMessage
 	authorizationServers  []string
 	once                  sync.Once
+	fetched               bool // true after once.Do completes successfully
 }
 
 // NewOAuthProxy creates an OAuth proxy from the given Config.
@@ -48,27 +48,51 @@ func NewOAuthProxy(cfg *Config, log *slog.Logger) *OAuthProxy {
 }
 
 // ASMetadataHandler returns an http.HandlerFunc that serves
-// /.well-known/oauth-authorization-server. It fetches the upstream IdP's
-// discovery document once, then builds and caches a custom RFC 8414
-// metadata document pointing authorization_endpoint to the upstream IdP
-// and token_endpoint/registration_endpoint to the MCP server's own handlers.
+// /.well-known/oauth-authorization-server per RFC 8414 and the MCP
+// specification (2025-03-26). It fetches the upstream IdP's discovery
+// document once, then serves a metadata document where the MCP server
+// acts as the authorization server (issuer matches the request origin).
 func (p *OAuthProxy) ASMetadataHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		p.once.Do(func() {
-			p.cachedMetadata = p.buildASMetadata(p.authorizationServers[0])
+			p.fetchUpstream(p.authorizationServers[0])
 		})
-
-		if p.cachedMetadata == nil {
+		if !p.fetched {
 			http.Error(w, "upstream AS metadata unavailable", http.StatusBadGateway)
 			return
 		}
 
+		// Build issuer from request so it matches the MCP server origin.
+		scheme := "https"
+		if r.TLS == nil {
+			if fp := r.Header.Get("X-Forwarded-Proto"); fp == "https" || fp == "http" {
+				scheme = fp
+			} else {
+				scheme = "http"
+			}
+		}
+		issuer := scheme + "://" + r.Host
+
+		b := jsonfast.Acquire()
+		b.BeginObject()
+		b.AddStringField("issuer", issuer)
+		b.AddStringField("authorization_endpoint", issuer+"/authorize")
+		b.AddStringField("token_endpoint", issuer+"/token")
+		b.AddStringField("registration_endpoint", issuer+"/register")
+		b.AddRawJSONField("response_types_supported", []byte(`["code"]`))
+		b.AddRawJSONField("grant_types_supported", []byte(`["authorization_code","refresh_token"]`))
+		b.AddRawJSONField("token_endpoint_auth_methods_supported", []byte(`["none"]`))
+		b.AddRawJSONField("code_challenge_methods_supported", []byte(`["S256"]`))
+		b.AddRawJSONField("scopes_supported", []byte(`["openid","profile","email","offline_access"]`))
+		b.EndObject()
+
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write(p.cachedMetadata); err != nil {
+		if _, err := w.Write(b.Bytes()); err != nil {
 			p.log.Debug("write AS metadata response", "err", err)
 		}
+		jsonfast.Release(b)
 	}
 }
 
@@ -103,6 +127,26 @@ func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 		}
 		jsonfast.Release(b)
 		p.log.Info("DCR shim: issued client_id", "client_id", p.clientID)
+	}
+}
+
+// AuthorizeHandler returns an http.HandlerFunc that redirects the user
+// to the upstream IdP's authorization endpoint, passing all query
+// parameters through. Per the MCP specification (2025-03-26), clients
+// use /authorize either from AS metadata or as the default fallback.
+// This handler 302-redirects to the real upstream IdP authorize URL.
+func (p *OAuthProxy) AuthorizeHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if p.upstreamAuthzEndpoint == "" {
+			http.Error(w, "authorization endpoint not configured", http.StatusBadGateway)
+			return
+		}
+		target := p.upstreamAuthzEndpoint
+		if q := r.URL.RawQuery; q != "" {
+			target += "?" + q
+		}
+		p.log.Debug("authorize redirect", "target", target)
+		http.Redirect(w, r, target, http.StatusFound)
 	}
 }
 
@@ -197,9 +241,9 @@ func (p *OAuthProxy) fetchUpstreamMeta(urls []string) *upstreamMeta {
 	return nil
 }
 
-// buildASMetadata fetches the upstream IdP's discovery document and constructs
-// a custom AS metadata document with our own registration and token endpoints.
-func (p *OAuthProxy) buildASMetadata(issuer string) json.RawMessage {
+// fetchUpstream fetches the upstream IdP's discovery document and stores
+// the authorization and token endpoints for later use by the proxy handlers.
+func (p *OAuthProxy) fetchUpstream(issuer string) {
 	issuer = strings.TrimRight(issuer, "/")
 	urls := []string{
 		issuer + "/.well-known/openid-configuration",
@@ -209,32 +253,15 @@ func (p *OAuthProxy) buildASMetadata(issuer string) json.RawMessage {
 	um := p.fetchUpstreamMeta(urls)
 	if um == nil {
 		p.log.Error("failed to fetch upstream AS metadata from any well-known URL")
-		return nil
+		return
 	}
 
 	p.upstreamTokenEndpoint = um.TokenEndpoint
 	p.upstreamAuthzEndpoint = um.AuthorizationEndpoint
+	p.fetched = true
 
 	p.log.Info("fetched upstream AS metadata",
 		"issuer", um.Issuer,
 		"authorization_endpoint", um.AuthorizationEndpoint,
 		"token_endpoint", um.TokenEndpoint)
-
-	b := jsonfast.Acquire()
-	b.BeginObject()
-	b.AddStringField("issuer", um.Issuer)
-	b.AddStringField("authorization_endpoint", um.AuthorizationEndpoint)
-	b.AddStringField("token_endpoint", "/oauth/token")
-	b.AddStringField("registration_endpoint", "/oauth/register")
-	b.AddRawJSONField("response_types_supported", []byte(`["code"]`))
-	b.AddRawJSONField("grant_types_supported", []byte(`["authorization_code","refresh_token"]`))
-	b.AddRawJSONField("token_endpoint_auth_methods_supported", []byte(`["none"]`))
-	b.AddRawJSONField("code_challenge_methods_supported", []byte(`["S256"]`))
-	b.AddRawJSONField("scopes_supported", []byte(`["openid","profile","email","offline_access"]`))
-	b.EndObject()
-	// Copy the bytes since the builder will be released.
-	data := make([]byte, b.Len())
-	copy(data, b.Bytes())
-	jsonfast.Release(b)
-	return json.RawMessage(data)
 }

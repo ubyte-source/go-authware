@@ -115,19 +115,24 @@ auth, err := authware.New(&authware.Config{
 }, nil)
 ```
 
-## OAuth Proxy (MCP 3/26)
+## OAuth Proxy (MCP 2025-03-26)
 
-The `OAuthProxy` bridges MCP clients (e.g. Claude Desktop) that require
-RFC 7591 Dynamic Client Registration and public-client auth with upstream
-IdPs (e.g. Azure AD, Okta) that don't natively support them.
+The `OAuthProxy` bridges MCP clients that require public-client OAuth
+with upstream IdPs (e.g. Azure AD, Okta) that don't natively support
+RFC 7591 Dynamic Client Registration.
 
-It provides three HTTP handlers:
+It provides four HTTP handlers per the [MCP specification (2025-03-26)](https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization):
 
 - **`ASMetadataHandler`** — serves `/.well-known/oauth-authorization-server`
-  with a custom RFC 8414 metadata document (fetched once, cached)
+  with RFC 8414 metadata (issuer derived from request origin; upstream
+  discovery fetched once via `sync.Once`)
+- **`AuthorizeHandler`** — 302-redirects to the upstream IdP's authorization
+  endpoint, forwarding all query parameters (PKCE, state, redirect_uri, etc.)
 - **`RegisterHandler`** — minimal RFC 7591 DCR shim returning a pre-configured
   `client_id`
 - **`TokenHandler`** — proxies token exchange requests to the upstream IdP
+
+MCP spec default endpoint paths are `/authorize`, `/token`, `/register`:
 
 ```go
 proxy := authware.NewOAuthProxy(&authware.Config{
@@ -136,9 +141,10 @@ proxy := authware.NewOAuthProxy(&authware.Config{
 }, slog.Default())
 
 if proxy != nil {
-    mux.HandleFunc("/.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
-    mux.HandleFunc("/oauth/register", proxy.RegisterHandler())
-    mux.HandleFunc("/oauth/token", proxy.TokenHandler())
+    mux.HandleFunc("GET /.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
+    mux.HandleFunc("GET /authorize", proxy.AuthorizeHandler())
+    mux.HandleFunc("POST /register", proxy.RegisterHandler())
+    mux.HandleFunc("POST /token", proxy.TokenHandler())
 }
 ```
 

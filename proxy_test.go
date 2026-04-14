@@ -147,10 +147,10 @@ func TestASMetadataHandler_Success(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	assertMetaString(t, meta, "issuer", "https://fake-issuer.example.com")
-	assertMetaString(t, meta, "authorization_endpoint", "https://fake-issuer.example.com/authorize")
-	assertMetaString(t, meta, "token_endpoint", "/oauth/token")
-	assertMetaString(t, meta, "registration_endpoint", "/oauth/register")
+	assertMetaString(t, meta, "issuer", "http://example.com")
+	assertMetaString(t, meta, "authorization_endpoint", "http://example.com/authorize")
+	assertMetaString(t, meta, "token_endpoint", "http://example.com/token")
+	assertMetaString(t, meta, "registration_endpoint", "http://example.com/register")
 	assertMetaArray(t, meta, "response_types_supported", "code")
 	assertMetaArray(t, meta, "token_endpoint_auth_methods_supported", "none")
 	assertMetaArray(t, meta, "code_challenge_methods_supported", "S256")
@@ -560,7 +560,90 @@ func TestTokenHandler_ForwardsHeaders(t *testing.T) {
 	}
 }
 
-// ── End-to-end: metadata → register → token ────────────────
+// ── AuthorizeHandler ────────────────────────────────────────
+
+func TestAuthorizeHandler_Redirect(t *testing.T) {
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	defer fakeAS.Close()
+
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{fakeAS.URL},
+		OAuthClientID:             "id",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// Trigger upstream fetch so upstreamAuthzEndpoint is populated.
+	w0 := httptest.NewRecorder()
+	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	if w0.Code != http.StatusOK {
+		t.Fatalf("metadata: expected 200, got %d", w0.Code)
+	}
+
+	// AuthorizeHandler should 302-redirect to the upstream authorize endpoint.
+	w := httptest.NewRecorder()
+	authzURL := "/authorize?" +
+		"response_type=code&client_id=cid" +
+		"&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcallback" +
+		"&code_challenge=abc&code_challenge_method=S256&state=xyz"
+	r := httptest.NewRequest(http.MethodGet, authzURL, http.NoBody)
+	p.AuthorizeHandler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://fake-issuer.example.com/authorize?") {
+		t.Fatalf("Location = %q, expected upstream authorize URL", loc)
+	}
+	if !strings.Contains(loc, "code_challenge=abc") {
+		t.Fatalf("Location missing code_challenge: %q", loc)
+	}
+	if !strings.Contains(loc, "state=xyz") {
+		t.Fatalf("Location missing state: %q", loc)
+	}
+}
+
+func TestAuthorizeHandler_NoQueryParams(t *testing.T) {
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	defer fakeAS.Close()
+
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{fakeAS.URL},
+		OAuthClientID:             "id",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	w0 := httptest.NewRecorder()
+	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/authorize", http.NoBody)
+	p.AuthorizeHandler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if loc != "https://fake-issuer.example.com/authorize" {
+		t.Fatalf("Location = %q", loc)
+	}
+}
+
+func TestAuthorizeHandler_NoUpstreamEndpoint(t *testing.T) {
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{"https://example.com"},
+		OAuthClientID:             "id",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// upstreamAuthzEndpoint is empty — not yet fetched.
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/authorize?state=abc", http.NoBody)
+	p.AuthorizeHandler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", w.Code)
+	}
+}
+
+// ── End-to-end: metadata → register → authorize → token ────
 
 // newE2EProxy creates a proxy pointing at the given fake IDP for E2E testing.
 func newE2EProxy(t *testing.T, fakeIDPURL string) *OAuthProxy {
