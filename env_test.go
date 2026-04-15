@@ -19,6 +19,8 @@ func testConfigFromEnvSetAll(t *testing.T) {
 	t.Setenv("AUTH_OAUTH_RESOURCE", "https://api.example.com")
 	t.Setenv("AUTH_OAUTH_RESOURCE_DOCUMENTATION", "https://docs.example.com")
 	t.Setenv("AUTH_OAUTH_RESOURCE_NAME", "My API")
+	t.Setenv("AUTH_OAUTH_CLIENT_ID", "proxy-client-id")
+	t.Setenv("AUTH_OAUTH_CLIENT_SECRET", "proxy-client-secret")
 	t.Setenv("AUTH_OAUTH_AUTHORIZATION_SERVERS", "https://auth1.example.com,https://auth2.example.com")
 }
 
@@ -77,6 +79,34 @@ func TestConfigFromEnv_ResourceMetadata(t *testing.T) {
 	}
 	if len(cfg.OAuthAuthorizationServers) != 2 {
 		t.Fatalf("OAuthAuthorizationServers = %v", cfg.OAuthAuthorizationServers)
+	}
+}
+
+func TestConfigFromEnv_Proxy(t *testing.T) {
+	testConfigFromEnvSetAll(t)
+	cfg := ConfigFromEnv()
+	if cfg.OAuthClientID != "proxy-client-id" {
+		t.Fatalf("OAuthClientID = %q", cfg.OAuthClientID)
+	}
+	if cfg.OAuthClientSecret != "proxy-client-secret" {
+		t.Fatalf("OAuthClientSecret = %q", cfg.OAuthClientSecret)
+	}
+}
+
+// TestConfigFromEnv_ProxyRoundTrip verifies that ConfigFromEnv produces a Config
+// that NewOAuthProxy accepts as valid — catching any future env-var/struct-field mismatches.
+func TestConfigFromEnv_ProxyRoundTrip(t *testing.T) {
+	testConfigFromEnvSetAll(t)
+	cfg := ConfigFromEnv()
+	p := NewOAuthProxy(cfg, nil)
+	if p == nil {
+		t.Fatal("NewOAuthProxy returned nil: OAuthClientID or OAuthAuthorizationServers not read from env")
+	}
+	if p.clientID != "proxy-client-id" {
+		t.Fatalf("proxy clientID = %q", p.clientID)
+	}
+	if p.clientSecret != "proxy-client-secret" {
+		t.Fatalf("proxy clientSecret = %q", p.clientSecret)
 	}
 }
 

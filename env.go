@@ -24,6 +24,7 @@ import (
 //   - AUTH_OAUTH_RESOURCE: protected resource identifier (RFC 9728)
 //   - AUTH_OAUTH_RESOURCE_DOCUMENTATION: resource documentation URL
 //   - AUTH_OAUTH_RESOURCE_NAME: human-readable resource name
+//   - AUTH_OAUTH_CLIENT_ID: upstream IdP client_id for the OAuth proxy DCR shim
 //   - AUTH_OAUTH_CLIENT_SECRET: upstream IdP client_secret (confidential client)
 //   - AUTH_OAUTH_AUTHORIZATION_SERVERS: comma-separated authorization server URLs
 func ConfigFromEnv() *Config {
@@ -40,6 +41,7 @@ func ConfigFromEnv() *Config {
 		OAuthResource:              os.Getenv("AUTH_OAUTH_RESOURCE"),
 		OAuthResourceDocumentation: os.Getenv("AUTH_OAUTH_RESOURCE_DOCUMENTATION"),
 		OAuthResourceName:          os.Getenv("AUTH_OAUTH_RESOURCE_NAME"),
+		OAuthClientID:              os.Getenv("AUTH_OAUTH_CLIENT_ID"),
 		OAuthClientSecret:          os.Getenv("AUTH_OAUTH_CLIENT_SECRET"),
 		OAuthRequiredScopes:        splitCSV(os.Getenv("AUTH_OAUTH_REQUIRED_SCOPES")),
 		OAuthAuthorizationServers:  splitCSV(os.Getenv("AUTH_OAUTH_AUTHORIZATION_SERVERS")),
