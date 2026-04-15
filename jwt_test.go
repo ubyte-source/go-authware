@@ -190,6 +190,48 @@ func TestOAuthMetadata_EmptyResource(t *testing.T) {
 	}
 }
 
+func TestOAuthMetadata_ProxyMode_OmitsAuthorizationServers(t *testing.T) {
+	a, err := New(&Config{
+		Mode:                      ModeOAuth,
+		OAuthIssuer:               "https://issuer.example.com",
+		OAuthHMACSecret:           "secret",
+		OAuthResource:             "https://api.example.com",
+		OAuthClientID:             "my-client-id", // triggers proxy mode
+		OAuthAuthorizationServers: []string{"https://upstream.example.com"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	md := a.Metadata("https://api.example.com")
+	if md == nil {
+		t.Fatal("expected metadata")
+	}
+	if md.AuthorizationServers != nil {
+		t.Fatalf("expected nil AuthorizationServers in proxy mode, got %v", md.AuthorizationServers)
+	}
+}
+
+func TestOAuthMetadata_NonProxyMode_IncludesAuthorizationServers(t *testing.T) {
+	a, err := New(&Config{
+		Mode:                      ModeOAuth,
+		OAuthIssuer:               "https://issuer.example.com",
+		OAuthHMACSecret:           "secret",
+		OAuthResource:             "https://api.example.com",
+		OAuthAuthorizationServers: []string{"https://upstream.example.com"},
+		// OAuthClientID is empty → no proxy mode
+	}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	md := a.Metadata("https://api.example.com")
+	if md == nil {
+		t.Fatal("expected metadata")
+	}
+	if len(md.AuthorizationServers) != 1 || md.AuthorizationServers[0] != "https://upstream.example.com" {
+		t.Fatalf("AuthorizationServers = %v, want [https://upstream.example.com]", md.AuthorizationServers)
+	}
+}
+
 func TestOAuth_MalformedJWT(t *testing.T) {
 	a, err := New(&Config{
 		Mode:            ModeOAuth,

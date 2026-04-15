@@ -115,13 +115,13 @@ auth, err := authware.New(&authware.Config{
 }, nil)
 ```
 
-## OAuth Proxy (MCP 2025-03-26)
+## OAuth Proxy (MCP 2025-11-25)
 
 The `OAuthProxy` bridges MCP clients that require public-client OAuth
 with upstream IdPs (e.g. Azure AD, Okta) that don't natively support
 RFC 7591 Dynamic Client Registration.
 
-It provides four HTTP handlers per the [MCP specification (2025-03-26)](https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization):
+It provides four HTTP handlers per the [MCP specification (2025-11-25)](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization):
 
 - **`ASMetadataHandler`** — serves `/.well-known/oauth-authorization-server`
   with RFC 8414 metadata (issuer derived from request origin; upstream
@@ -209,18 +209,18 @@ Measured on Intel Xeon Gold 6426Y (32 cores):
 
 | Benchmark | ns/op | B/op | allocs/op |
 |-----------|------:|-----:|----------:|
-| Bearer (accept) | 19 | 0 | 0 |
-| Bearer (reject) | 10 | 0 | 0 |
+| Bearer (accept) | 20 | 0 | 0 |
+| Bearer (reject) | 11 | 0 | 0 |
 | API Key | 23 | 0 | 0 |
-| API Key (Authorization header) | 37 | 0 | 0 |
+| API Key (Authorization header) | 36 | 0 | 0 |
 | None | 4 | 0 | 0 |
-| OAuth HMAC HS256 | 1086 | 24 | 1 |
-| Scope check | 33 | 0 | 0 |
+| OAuth HMAC HS256 | 1050 | 24 | 1 |
+| Scope check | 32 | 0 | 0 |
 | Secure equal | 22 | 0 | 0 |
-| Proxy: Register (DCR) | 4356 | 6475 | 22 |
-| Proxy: AS Metadata (cached) | 2874 | 6533 | 19 |
-| Proxy: Token | 85083 | 50920 | 120 |
-| Middleware (Bearer) | 361 | 624 | 7 |
+| Proxy: Register (DCR) | 4365 | 6480 | 22 |
+| Proxy: AS Metadata (cached) | 3693 | 6676 | 23 |
+| Proxy: Token | 96172 | 50914 | 120 |
+| Middleware (Bearer) | 355 | 624 | 7 |
 
 Hot paths (Bearer, API Key, None, Scope check, Secure equal) are **zero-allocation**.
 OAuth HMAC has a single allocation for the HMAC hash buffer reuse.

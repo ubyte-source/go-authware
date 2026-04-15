@@ -65,6 +65,21 @@ func TestNewOAuthProxy_NilLogger(t *testing.T) {
 	}
 }
 
+func TestNewOAuthProxy_CopiesRequiredScopes(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	scopes := []string{"api://app/.default", "openid"}
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{"https://example.com"},
+		OAuthClientID:             "id",
+		OAuthRequiredScopes:       scopes,
+	}, log)
+	// Mutate original slice — proxy should not be affected.
+	scopes[0] = "mutated"
+	if p.requiredScopes[0] != "api://app/.default" {
+		t.Fatal("proxy should have its own copy of requiredScopes")
+	}
+}
+
 func TestNewOAuthProxy_CopiesServers(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	servers := []string{"https://a.com", "https://b.com"}
@@ -158,6 +173,113 @@ func TestASMetadataHandler_Success(t *testing.T) {
 	gt, ok := meta["grant_types_supported"].([]any)
 	if !ok || len(gt) < 2 {
 		t.Fatalf("grant_types_supported = %v", meta["grant_types_supported"])
+	}
+}
+
+func TestASMetadataHandler_ScopesSupportedIncludesRequiredScopes(t *testing.T) {
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	defer fakeAS.Close()
+
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{fakeAS.URL},
+		OAuthClientID:             "id",
+		OAuthRequiredScopes:       []string{"api://c1e7f8b5/.default"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	w := httptest.NewRecorder()
+	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var meta map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	arr, ok := meta["scopes_supported"].([]any)
+	if !ok {
+		t.Fatalf("scopes_supported not an array: %v", meta["scopes_supported"])
+	}
+
+	// Must contain the OIDC base scopes plus the API scope.
+	found := make(map[string]bool, len(arr))
+	for _, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("scopes_supported element not a string: %v", v)
+		}
+		found[s] = true
+	}
+	for _, want := range []string{"openid", "profile", "email", "offline_access", "api://c1e7f8b5/.default"} {
+		if !found[want] {
+			t.Fatalf("scopes_supported missing %q, got %v", want, arr)
+		}
+	}
+}
+
+func TestASMetadataHandler_ScopesSupportedNoDuplicates(t *testing.T) {
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	defer fakeAS.Close()
+
+	// "openid" is already a base OIDC scope — should not be duplicated.
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{fakeAS.URL},
+		OAuthClientID:             "id",
+		OAuthRequiredScopes:       []string{"openid", "custom"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	w := httptest.NewRecorder()
+	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+
+	var meta map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	arr, ok := meta["scopes_supported"].([]any)
+	if !ok {
+		t.Fatalf("scopes_supported not an array: %v", meta["scopes_supported"])
+	}
+	count := 0
+	for _, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("scopes_supported element not a string: %v", v)
+		}
+		if s == "openid" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("openid appears %d times, want 1; scopes = %v", count, arr)
+	}
+}
+
+func TestASMetadataHandler_ScopesSupportedNoExtraScopes(t *testing.T) {
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	defer fakeAS.Close()
+
+	// No extra required scopes — should have just the OIDC base scopes.
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{fakeAS.URL},
+		OAuthClientID:             "id",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	w := httptest.NewRecorder()
+	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+
+	var meta map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	arr, ok := meta["scopes_supported"].([]any)
+	if !ok {
+		t.Fatalf("scopes_supported not an array: %v", meta["scopes_supported"])
+	}
+	// Base scopes only.
+	if len(arr) != 4 {
+		t.Fatalf("expected 4 base scopes, got %d: %v", len(arr), arr)
 	}
 }
 

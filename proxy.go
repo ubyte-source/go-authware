@@ -15,7 +15,7 @@ import (
 
 const proxyFetchTimeout = 10 * time.Second
 
-// OAuthProxy provides HTTP handlers for the MCP 2025-03-26 OAuth facade.
+// OAuthProxy provides HTTP handlers for the MCP 2025-11-25 OAuth facade.
 // It handles AS metadata discovery, Dynamic Client Registration (DCR) shim,
 // authorization redirect, and token endpoint proxying. This bridges MCP
 // clients that require public-client OAuth with upstream IdPs that don't
@@ -23,6 +23,7 @@ const proxyFetchTimeout = 10 * time.Second
 type OAuthProxy struct {
 	log                   *slog.Logger
 	clientID              string
+	requiredScopes        []string // from OAuthRequiredScopes, included in scopes_supported
 	upstreamTokenEndpoint string
 	upstreamAuthzEndpoint string
 	authorizationServers  []string
@@ -42,6 +43,7 @@ func NewOAuthProxy(cfg *Config, log *slog.Logger) *OAuthProxy {
 	}
 	return &OAuthProxy{
 		clientID:             cfg.OAuthClientID,
+		requiredScopes:       append([]string(nil), cfg.OAuthRequiredScopes...),
 		authorizationServers: append([]string(nil), cfg.OAuthAuthorizationServers...),
 		log:                  log,
 	}
@@ -49,7 +51,7 @@ func NewOAuthProxy(cfg *Config, log *slog.Logger) *OAuthProxy {
 
 // ASMetadataHandler returns an http.HandlerFunc that serves
 // /.well-known/oauth-authorization-server per RFC 8414 and the MCP
-// specification (2025-03-26). It fetches the upstream IdP's discovery
+// specification (2025-11-25). It fetches the upstream IdP's discovery
 // document once, then serves a metadata document where the MCP server
 // acts as the authorization server (issuer matches the request origin).
 func (p *OAuthProxy) ASMetadataHandler() http.HandlerFunc {
@@ -83,7 +85,7 @@ func (p *OAuthProxy) ASMetadataHandler() http.HandlerFunc {
 		b.AddRawJSONField("grant_types_supported", []byte(`["authorization_code","refresh_token"]`))
 		b.AddRawJSONField("token_endpoint_auth_methods_supported", []byte(`["none"]`))
 		b.AddRawJSONField("code_challenge_methods_supported", []byte(`["S256"]`))
-		b.AddRawJSONField("scopes_supported", []byte(`["openid","profile","email","offline_access"]`))
+		p.writeScopesSupported(b)
 		b.EndObject()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -132,7 +134,7 @@ func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 
 // AuthorizeHandler returns an http.HandlerFunc that redirects the user
 // to the upstream IdP's authorization endpoint, passing all query
-// parameters through. Per the MCP specification (2025-03-26), clients
+// parameters through. Per the MCP specification (2025-11-25), clients
 // use /authorize either from AS metadata or as the default fallback.
 // This handler 302-redirects to the real upstream IdP authorize URL.
 func (p *OAuthProxy) AuthorizeHandler() http.HandlerFunc {
@@ -201,6 +203,42 @@ func (p *OAuthProxy) TokenHandler() http.HandlerFunc {
 
 		p.log.Debug("token proxy: forwarded", "status", resp.StatusCode)
 	}
+}
+
+// writeScopesSupported writes the "scopes_supported" JSON array field.
+// It always includes standard OIDC scopes and appends any configured
+// OAuthRequiredScopes (e.g. "api://.../.default") so that MCP clients
+// know which scopes to request during the authorization flow.
+func (p *OAuthProxy) writeScopesSupported(b *jsonfast.Builder) {
+	// De-duplicate: keep base scopes, add configured scopes not already present.
+	base := [...]string{"openid", "profile", "email", "offline_access"}
+	seen := make(map[string]struct{}, len(base)+len(p.requiredScopes))
+	for _, s := range base {
+		seen[s] = struct{}{}
+	}
+
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i, s := range base {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('"')
+		sb.WriteString(s)
+		sb.WriteByte('"')
+	}
+	for _, s := range p.requiredScopes {
+		if _, dup := seen[s]; dup || s == "" {
+			continue
+		}
+		seen[s] = struct{}{}
+		sb.WriteByte(',')
+		sb.WriteByte('"')
+		sb.WriteString(s)
+		sb.WriteByte('"')
+	}
+	sb.WriteByte(']')
+	b.AddRawJSONField("scopes_supported", []byte(sb.String()))
 }
 
 // upstreamMeta holds the fields we need from an upstream IdP discovery document.

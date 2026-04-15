@@ -95,10 +95,10 @@ type oauthAuthenticator struct {
 	authorizationServers []string
 	// keysExpiry before requiredScopes so that keysExpiry.loc (pointer at +16)
 	// is not the last pointer field — requiredScopes' data pointer (at +208) is.
-	// This ordering minimizes the GC pointer bitmap to 216 bytes.
+	// This ordering minimizes the GC pointer bitmap to 232 bytes.
 	keysExpiry     time.Time
 	requiredScopes []string // last pointer-containing field
-	// Non-pointer mutex fields last: they fall outside the GC pointer bitmap.
+	// Non-pointer fields last: they fall outside the GC pointer bitmap.
 	// Lock ordering: mu guards keys+keysExpiry; refreshMu serializes JWKS fetches.
 	mu        sync.RWMutex
 	refreshMu sync.Mutex
@@ -165,6 +165,16 @@ type jwk struct {
 	Y   string `json:"y,omitempty"`
 }
 
+// authorizationServersForMode returns a defensive copy of servers in
+// non-proxy mode, or nil in proxy mode (clientID set) so the transport
+// fills authorization_servers from the request origin at runtime.
+func authorizationServersForMode(servers []string, clientID string) []string {
+	if clientID != "" {
+		return nil
+	}
+	return append([]string(nil), servers...)
+}
+
 func newOAuthAuthenticator(cfg *Config, client *http.Client) (Authenticator, error) {
 	if cfg.OAuthIssuer == "" {
 		return nil, errOAuthIssuerRequired
@@ -188,7 +198,7 @@ func newOAuthAuthenticator(cfg *Config, client *http.Client) (Authenticator, err
 		resourceName:          cfg.OAuthResourceName,
 		hmacSecret:            secret,
 		requiredScopes:        append([]string(nil), cfg.OAuthRequiredScopes...),
-		authorizationServers:  append([]string(nil), servers...),
+		authorizationServers:  authorizationServersForMode(servers, cfg.OAuthClientID),
 	}
 	if len(secret) > 0 {
 		pools := &[3]sync.Pool{}
@@ -243,9 +253,13 @@ func (a *oauthAuthenticator) Metadata(resource string) *ProtectedResourceMetadat
 	if resource == "" {
 		return nil
 	}
+	// When authorizationServers is nil the MCP server IS the authorization
+	// server (proxy mode).  Leave the field empty so the transport fills it
+	// from the request origin (it cannot be known at config time).
+	servers := append([]string(nil), a.authorizationServers...)
 	return &ProtectedResourceMetadata{
 		Resource:               resource,
-		AuthorizationServers:   append([]string(nil), a.authorizationServers...),
+		AuthorizationServers:   servers,
 		ScopesSupported:        append([]string(nil), a.requiredScopes...),
 		BearerMethodsSupported: []string{"header"},
 		ResourceDocumentation:  a.resourceDocumentation,

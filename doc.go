@@ -71,13 +71,15 @@
 //
 // OAuthProxy bridges MCP clients (e.g. Claude Desktop) with upstream IdPs
 // that don't support RFC 7591 Dynamic Client Registration. It provides
-// three handlers: ASMetadataHandler, RegisterHandler, and TokenHandler.
+// four handlers: ASMetadataHandler, AuthorizeHandler, RegisterHandler,
+// and TokenHandler.
 // All proxy JSON serialization uses go-jsonfast Builder with pooled buffers.
 //
 //	proxy := authware.NewOAuthProxy(cfg, slog.Default())
-//	mux.HandleFunc("/.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
-//	mux.HandleFunc("/oauth/register", proxy.RegisterHandler())
-//	mux.HandleFunc("/oauth/token", proxy.TokenHandler())
+//	mux.HandleFunc("GET /.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
+//	mux.HandleFunc("GET /authorize", proxy.AuthorizeHandler())
+//	mux.HandleFunc("POST /register", proxy.RegisterHandler())
+//	mux.HandleFunc("POST /token", proxy.TokenHandler())
 //
 // # Dependencies
 //
