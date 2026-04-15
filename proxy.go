@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,13 @@ type OAuthProxy struct {
 	// scopesJSON is the pre-serialized "scopes_supported" JSON array,
 	// computed once at construction to avoid per-request map+Builder allocations.
 	scopesJSON []byte
+	// upstreamScopeStr is the space-separated scope string injected into the
+	// upstream Azure AD / IdP authorization request. It qualifies bare scope
+	// names (e.g. "openobserve") with the resource URI
+	// (e.g. "api://c1e7f8b5-.../openobserve") so the IdP can resolve them.
+	// Empty when no resource URI is configured; in that case the client's
+	// scope parameter is forwarded as-is.
+	upstreamScopeStr string
 	// credentials is the pre-built "client_id=...&client_secret=..." byte slice,
 	// computed once at construction for use in injectClientCredentials.
 	credentials []byte
@@ -80,6 +88,7 @@ func NewOAuthProxy(cfg *Config, log *slog.Logger) *OAuthProxy {
 		requiredScopes:       scopes,
 		authorizationServers: append([]string(nil), cfg.OAuthAuthorizationServers...),
 		scopesJSON:           buildScopesJSON(scopes),
+		upstreamScopeStr:     buildUpstreamScopeStr(cfg.OAuthResource, scopes),
 		credentials:          buildCredentials(cfg.OAuthClientID, cfg.OAuthClientSecret),
 		log:                  log,
 	}
@@ -115,6 +124,53 @@ func buildScopesJSON(requiredScopes []string) []byte {
 	}
 	buf.WriteByte(']')
 	return buf.Bytes()
+}
+
+// buildUpstreamScopeStr returns the space-separated scope string to inject into
+// the upstream IdP's authorization request.
+//
+// Azure AD (and similar IdPs) require custom API scopes to be fully qualified as
+// "{resource_uri}/{scope}" (e.g. "api://c1e7f8b5-.../openobserve"). MCP clients
+// such as Claude discover the short scope name from the server's metadata and may
+// strip the resource prefix before sending the authorization request, causing
+// the IdP to fail with "scope not found on resource".
+//
+// This function qualifies any bare scope name (no "://" and no "/") with the
+// configured resource URI. Already-qualified scopes (containing "://") are kept
+// as-is. The four standard OIDC scopes are always prepended.
+//
+// Example: resource="api://abc", scopes=["openobserve"]
+//
+//	→ "openid offline_access api://abc/openobserve"
+func buildUpstreamScopeStr(resource string, requiredScopes []string) string {
+	if len(requiredScopes) == 0 {
+		return ""
+	}
+	resource = strings.TrimRight(resource, "/")
+	seen := make(map[string]struct{}, len(requiredScopes)+2)
+	parts := make([]string, 0, len(requiredScopes)+2)
+	for _, s := range []string{"openid", "offline_access"} {
+		seen[s] = struct{}{}
+		parts = append(parts, s)
+	}
+	for _, s := range requiredScopes {
+		if s == "" {
+			continue
+		}
+		// Skip if the bare name is already present (e.g. "openid" already added above).
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		qualified := s
+		if resource != "" && !strings.Contains(s, "://") && !strings.Contains(s, "/") {
+			qualified = resource + "/" + s
+		}
+		if _, dup := seen[qualified]; !dup {
+			seen[qualified] = struct{}{}
+			parts = append(parts, qualified)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // buildCredentials returns the pre-built "client_id=...&client_secret=..." form
@@ -229,10 +285,14 @@ func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 }
 
 // AuthorizeHandler returns an http.HandlerFunc that redirects the user
-// to the upstream IdP's authorization endpoint, passing all query
-// parameters through. Per the MCP specification (2025-11-25), clients
-// use /authorize either from AS metadata or as the default fallback.
-// This handler 302-redirects to the real upstream IdP authorize URL.
+// to the upstream IdP's authorization endpoint.
+//
+// When upstreamScopeStr is set (derived from OAuthResource + OAuthRequiredScopes),
+// it replaces the "scope" query parameter in the redirect. This is necessary
+// because MCP clients such as Claude strip the resource URI prefix from scopes
+// (sending "openobserve" instead of "api://c1e7f8b5-.../openobserve"), which
+// causes Azure AD to look for the scope on Microsoft Graph and fail with
+// AADSTS650053. The proxy re-qualifies the scope before forwarding.
 func (p *OAuthProxy) AuthorizeHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p.once.Do(p.fetchUpstream)
@@ -241,10 +301,18 @@ func (p *OAuthProxy) AuthorizeHandler() http.HandlerFunc {
 			return
 		}
 		target := p.upstreamAuthzEndpoint
-		if q := r.URL.RawQuery; q != "" {
+		q := r.URL.RawQuery
+		if p.upstreamScopeStr != "" && q != "" {
+			vals, err := url.ParseQuery(q)
+			if err == nil {
+				vals.Set("scope", p.upstreamScopeStr)
+				q = vals.Encode()
+			}
+		}
+		if q != "" {
 			target += "?" + q
 		}
-		p.log.Debug("authorize redirect", "target", target)
+		p.log.Debug("authorize redirect", "target", target, "scope", p.upstreamScopeStr)
 		http.Redirect(w, r, target, http.StatusFound)
 	}
 }

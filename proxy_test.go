@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -797,6 +798,145 @@ func TestAuthorizeHandler_NoQueryParams(t *testing.T) {
 	loc := w.Header().Get("Location")
 	if loc != "https://fake-issuer.example.com/authorize" {
 		t.Fatalf("Location = %q", loc)
+	}
+}
+
+func TestBuildUpstreamScopeStr(t *testing.T) {
+	cases := []struct {
+		name     string
+		resource string
+		scopes   []string
+		want     string
+	}{
+		{
+			name:     "no scopes returns empty",
+			resource: "api://abc",
+			scopes:   nil,
+			want:     "",
+		},
+		{
+			name:     "qualifies bare scope with resource",
+			resource: "api://c1e7f8b5-e89c-4fbb-90db-69a101e581db",
+			scopes:   []string{"openobserve"},
+			want:     "openid offline_access api://c1e7f8b5-e89c-4fbb-90db-69a101e581db/openobserve",
+		},
+		{
+			name:     "strips trailing slash from resource",
+			resource: "api://abc/",
+			scopes:   []string{"read"},
+			want:     "openid offline_access api://abc/read",
+		},
+		{
+			name:     "already-qualified scope not double-qualified",
+			resource: "api://abc",
+			scopes:   []string{"api://abc/openobserve"},
+			want:     "openid offline_access api://abc/openobserve",
+		},
+		{
+			name:     "no resource passes scope as-is",
+			resource: "",
+			scopes:   []string{"openobserve"},
+			want:     "openid offline_access openobserve",
+		},
+		{
+			name:     "deduplicates openid and offline_access if in scopes",
+			resource: "api://abc",
+			scopes:   []string{"openid", "myapi"},
+			want:     "openid offline_access api://abc/myapi",
+		},
+		{
+			name:     "multiple scopes all qualified",
+			resource: "api://abc",
+			scopes:   []string{"read", "write"},
+			want:     "openid offline_access api://abc/read api://abc/write",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildUpstreamScopeStr(tc.resource, tc.scopes)
+			if got != tc.want {
+				t.Fatalf("buildUpstreamScopeStr(%q, %v) = %q, want %q",
+					tc.resource, tc.scopes, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAuthorizeHandler_RewritesScopeForAzureAD(t *testing.T) {
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	defer fakeAS.Close()
+
+	// Simulate Azure AD setup: short scope name in OAuthRequiredScopes,
+	// full resource URI in OAuthResource. The handler must qualify the scope
+	// before forwarding to Azure AD.
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{fakeAS.URL},
+		OAuthClientID:             "c1e7f8b5-e89c-4fbb-90db-69a101e581db",
+		OAuthRequiredScopes:       []string{"openobserve"},
+		OAuthResource:             "api://c1e7f8b5-e89c-4fbb-90db-69a101e581db",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	w0 := httptest.NewRecorder()
+	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+
+	// Claude sends the short scope (stripped prefix) — the proxy must fix it.
+	w := httptest.NewRecorder()
+	q := "response_type=code&client_id=cid&scope=openid+offline_access+openobserve&state=xyz"
+	r := httptest.NewRequest(http.MethodGet, "/authorize?"+q, http.NoBody)
+	p.AuthorizeHandler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	parsed, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	gotScope := parsed.Query().Get("scope")
+	wantScope := "openid offline_access api://c1e7f8b5-e89c-4fbb-90db-69a101e581db/openobserve"
+	if gotScope != wantScope {
+		t.Fatalf("scope in redirect = %q, want %q", gotScope, wantScope)
+	}
+	// Other params must be preserved.
+	if parsed.Query().Get("state") != "xyz" {
+		t.Fatalf("state missing from redirect: %q", loc)
+	}
+}
+
+func TestAuthorizeHandler_NoScopeRewriteWhenNoResource(t *testing.T) {
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	defer fakeAS.Close()
+
+	// No OAuthResource configured: scope is forwarded as-is.
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{fakeAS.URL},
+		OAuthClientID:             "id",
+		OAuthRequiredScopes:       []string{"openobserve"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	w0 := httptest.NewRecorder()
+	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/authorize?scope=openobserve&state=s1", http.NoBody)
+	p.AuthorizeHandler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	parsed, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	// upstreamScopeStr = "openid offline_access openobserve" (no resource → no prefix)
+	gotScope := parsed.Query().Get("scope")
+	if !strings.Contains(gotScope, "openobserve") {
+		t.Fatalf("scope %q should contain openobserve", gotScope)
+	}
+	if strings.Contains(gotScope, "api://") {
+		t.Fatalf("scope %q should not contain api:// when no resource configured", gotScope)
 	}
 }
 
