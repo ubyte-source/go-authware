@@ -29,10 +29,22 @@ var (
 )
 
 // OAuthProxy provides HTTP handlers for the MCP 2025-11-25 OAuth facade.
-// It handles AS metadata discovery, Dynamic Client Registration (DCR) shim,
-// authorization redirect, and token endpoint proxying. This bridges MCP
-// clients that require public-client OAuth with upstream IdPs that don't
-// natively support RFC 7591 DCR.
+// It handles AS metadata discovery, a static client registration shim
+// (RFC 7591-compatible compatibility facade), authorization redirect, and
+// token endpoint proxying. This bridges MCP clients that require public-client
+// OAuth with upstream IdPs where the actual application is pre-registered.
+//
+// Bridge model: downstream MCP clients are treated as public clients
+// (no credentials); the proxy optionally acts as a confidential backend
+// by injecting client_id and client_secret into upstream token requests
+// when OAuthClientSecret is configured.
+//
+// Upstream discovery: the authorization and token endpoints are fetched from
+// the upstream IdP's discovery document once, on the first request, using
+// sync.Once. The result is cached for the lifetime of the process. If the
+// upstream IdP rotates its endpoints, the process must be restarted to
+// pick up the new values. This is an intentional trade-off: the vast majority
+// of IdPs (Azure AD, Okta, Google) publish stable, permanent endpoint URLs.
 type OAuthProxy struct {
 	log                   *slog.Logger
 	clientID              string
@@ -122,9 +134,7 @@ func buildCredentials(clientID, clientSecret string) []byte {
 // acts as the authorization server (issuer matches the request origin).
 func (p *OAuthProxy) ASMetadataHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p.once.Do(func() {
-			p.fetchUpstream(p.authorizationServers[0])
-		})
+		p.once.Do(p.fetchUpstream)
 		if !p.fetched {
 			http.Error(w, "upstream AS metadata unavailable", http.StatusBadGateway)
 			return
@@ -164,17 +174,36 @@ func (p *OAuthProxy) ASMetadataHandler() http.HandlerFunc {
 	}
 }
 
-// RegisterHandler returns an http.HandlerFunc implementing a minimal
-// RFC 7591 Dynamic Client Registration shim. It accepts any registration
-// request and returns the pre-configured upstream IdP client_id.
+// RegisterHandler returns an http.HandlerFunc that acts as a static client
+// registration shim compatible with RFC 7591. It always returns the
+// pre-configured upstream IdP client_id without persisting any client metadata.
+//
+// The redirect_uris field from the request body is echoed back verbatim so
+// that MCP clients know which URI to include in the authorization request.
+// The URIs are not validated here; they must be pre-registered with the
+// upstream IdP out-of-band.
+//
+// This bridges MCP clients that require RFC 7591 Dynamic Client Registration
+// with upstream IdPs where the actual client is pre-registered out-of-band.
+// The MCP client is treated as a public client (token_endpoint_auth_method=none);
+// the proxy optionally acts as a confidential backend by injecting credentials
+// in TokenHandler when OAuthClientSecret is set.
 func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Read and discard the request body (RFC 7591 client metadata).
-		if _, err := io.Copy(io.Discard, io.LimitReader(r.Body, 64<<10)); err != nil {
-			p.log.Debug("discard DCR request body", "err", err)
+		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+		if closeErr := r.Body.Close(); closeErr != nil {
+			p.log.Debug("close DCR request body", "err", closeErr)
 		}
-		if err := r.Body.Close(); err != nil {
-			p.log.Debug("close DCR request body", "err", err)
+		if err != nil {
+			p.log.Debug("read DCR request body", "err", err)
+		}
+
+		// Echo back the redirect_uris the client sent. RFC 7591 §3.2.1 requires
+		// the registered redirect_uris to appear in the response so the client
+		// knows which URI to use in the authorization request.
+		redirectURIs := []byte(`[]`)
+		if raw, ok := jsonfast.FindField(body, "redirect_uris"); ok && len(raw) > 0 {
+			redirectURIs = raw
 		}
 
 		b := jsonfast.Acquire()
@@ -184,7 +213,7 @@ func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 		b.AddStringField("token_endpoint_auth_method", "none")
 		b.AddRawJSONField("grant_types", []byte(`["authorization_code","refresh_token"]`))
 		b.AddRawJSONField("response_types", []byte(`["code"]`))
-		b.AddRawJSONField("redirect_uris", []byte(`[]`))
+		b.AddRawJSONField("redirect_uris", redirectURIs)
 		b.EndObject()
 		data := b.Bytes()
 
@@ -194,7 +223,8 @@ func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 			p.log.Debug("write DCR response", "err", err)
 		}
 		jsonfast.Release(b)
-		p.log.Info("DCR shim: issued client_id", "client_id", p.clientID)
+		p.log.Info("DCR shim: issued client_id", "client_id", p.clientID,
+			"redirect_uris", string(redirectURIs))
 	}
 }
 
@@ -205,9 +235,7 @@ func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 // This handler 302-redirects to the real upstream IdP authorize URL.
 func (p *OAuthProxy) AuthorizeHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p.once.Do(func() {
-			p.fetchUpstream(p.authorizationServers[0])
-		})
+		p.once.Do(p.fetchUpstream)
 		if p.upstreamAuthzEndpoint == "" {
 			http.Error(w, "authorization endpoint not configured", http.StatusBadGateway)
 			return
@@ -225,15 +253,18 @@ func (p *OAuthProxy) AuthorizeHandler() http.HandlerFunc {
 // requests to the upstream IdP's token endpoint.
 func (p *OAuthProxy) TokenHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p.once.Do(func() {
-			p.fetchUpstream(p.authorizationServers[0])
-		})
+		p.once.Do(p.fetchUpstream)
 		if p.upstreamTokenEndpoint == "" {
 			http.Error(w, "token endpoint not configured", http.StatusBadGateway)
 			return
 		}
 		body, ok := p.readTokenBody(w, r)
 		if !ok {
+			return
+		}
+		gt := formValue(body, "grant_type")
+		if !bytes.Equal(gt, []byte("authorization_code")) && !bytes.Equal(gt, []byte("refresh_token")) {
+			http.Error(w, "unsupported grant_type", http.StatusBadRequest)
 			return
 		}
 		if p.clientSecret != "" {
@@ -243,9 +274,13 @@ func (p *OAuthProxy) TokenHandler() http.HandlerFunc {
 	}
 }
 
-// readTokenBody reads and returns the request body up to 64 KiB.
-// On read error it writes a 400 response and returns (nil, false).
+// readTokenBody validates the Content-Type and reads the request body up to 64 KiB.
+// On validation or read error it writes the appropriate response and returns (nil, false).
 func (p *OAuthProxy) readTokenBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+		http.Error(w, "Content-Type must be application/x-www-form-urlencoded", http.StatusBadRequest)
+		return nil, false
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
 	if closeErr := r.Body.Close(); closeErr != nil {
 		p.log.Debug("close token request body", "err", closeErr)
@@ -255,6 +290,28 @@ func (p *OAuthProxy) readTokenBody(w http.ResponseWriter, r *http.Request) ([]by
 		return nil, false
 	}
 	return body, true
+}
+
+// formValue extracts the first occurrence of a URL-encoded form field value
+// from a raw application/x-www-form-urlencoded body. The field must be
+// preceded by the start of the body or an '&' separator.
+func formValue(body []byte, name string) []byte {
+	search := []byte(name + "=")
+	for len(body) > 0 {
+		i := bytes.Index(body, search)
+		if i < 0 {
+			return nil
+		}
+		if i == 0 || body[i-1] == '&' {
+			val := body[i+len(search):]
+			if j := bytes.IndexByte(val, '&'); j >= 0 {
+				return val[:j]
+			}
+			return val
+		}
+		body = body[i+1:]
+	}
+	return nil
 }
 
 // proxyToken forwards a token exchange request to the upstream IdP and
@@ -393,27 +450,29 @@ func unquote(b []byte) string {
 	return string(b)
 }
 
-// fetchUpstream fetches the upstream IdP's discovery document and stores
-// the authorization and token endpoints for later use by the proxy handlers.
-func (p *OAuthProxy) fetchUpstream(issuer string) {
-	issuer = strings.TrimRight(issuer, "/")
-	urls := []string{
-		issuer + "/.well-known/openid-configuration",
-		issuer + "/.well-known/oauth-authorization-server",
-	}
-
-	um := p.fetchUpstreamMeta(urls)
-	if um == nil {
-		p.log.Error("failed to fetch upstream AS metadata from any well-known URL")
+// fetchUpstream iterates p.authorizationServers in order, fetching the first
+// valid upstream AS discovery document and storing the authorization and token
+// endpoints for later use by the proxy handlers.
+func (p *OAuthProxy) fetchUpstream() {
+	for _, server := range p.authorizationServers {
+		issuer := strings.TrimRight(server, "/")
+		urls := []string{
+			issuer + "/.well-known/openid-configuration",
+			issuer + "/.well-known/oauth-authorization-server",
+		}
+		um := p.fetchUpstreamMeta(urls)
+		if um == nil {
+			p.log.Warn("upstream AS metadata unavailable, trying next", "server", server)
+			continue
+		}
+		p.upstreamTokenEndpoint = um.TokenEndpoint
+		p.upstreamAuthzEndpoint = um.AuthorizationEndpoint
+		p.fetched = true
+		p.log.Info("fetched upstream AS metadata",
+			"issuer", um.Issuer,
+			"authorization_endpoint", um.AuthorizationEndpoint,
+			"token_endpoint", um.TokenEndpoint)
 		return
 	}
-
-	p.upstreamTokenEndpoint = um.TokenEndpoint
-	p.upstreamAuthzEndpoint = um.AuthorizationEndpoint
-	p.fetched = true
-
-	p.log.Info("fetched upstream AS metadata",
-		"issuer", um.Issuer,
-		"authorization_endpoint", um.AuthorizationEndpoint,
-		"token_endpoint", um.TokenEndpoint)
+	p.log.Error("failed to fetch upstream AS metadata from any configured server")
 }

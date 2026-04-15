@@ -252,6 +252,7 @@ func BenchmarkProxy_TokenHandler(b *testing.B) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/oauth/token",
 			strings.NewReader("grant_type=authorization_code&code=bench"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		handler.ServeHTTP(rec, req)
 	}
 }

@@ -1665,3 +1665,215 @@ func TestFetchAndParseJWKS_CloseError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// ── bearerToken ──────────────────────────────────────────────
+
+func TestBearerToken(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+		ok     bool
+	}{
+		{"valid", "Bearer mytoken", "mytoken", true},
+		{"valid lowercase", "bearer mytoken", "mytoken", true},
+		{"valid uppercase", "BEARER mytoken", "mytoken", true},
+		{"valid mixed case", "BeArEr mytoken", "mytoken", true},
+		{"empty", "", "", false},
+		{"bearer only no space", "Bearer", "", false},         // len==6, <= 7
+		{"bearer plus 1 char no space", "BearerX", "", false}, // len==7, <= 7
+		{"wrong scheme", "Basic token", "", false},
+		{"almost bearer", "Xearer mytoken", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := bearerToken(tc.header)
+			if ok != tc.ok {
+				t.Fatalf("bearerToken(%q) ok=%v, want %v", tc.header, ok, tc.ok)
+			}
+			if ok && got != tc.want {
+				t.Fatalf("bearerToken(%q) = %q, want %q", tc.header, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── splitJWT ─────────────────────────────────────────────────
+
+// TestSplitJWT_Valid covers the happy paths of splitJWT.
+func TestSplitJWT_Valid(t *testing.T) {
+	h, p, s, si, ok := splitJWT([]byte("aaa.bbb.ccc"))
+	if !ok || string(h) != "aaa" || string(p) != "bbb" || string(s) != "ccc" || string(si) != "aaa.bbb" {
+		t.Fatalf("splitJWT: ok=%v h=%s p=%s s=%s si=%s", ok, h, p, s, si)
+	}
+	// Empty signature part is a valid three-segment JWT.
+	h2, p2, s2, _, ok2 := splitJWT([]byte("aaa.bbb."))
+	if !ok2 || string(h2) != "aaa" || string(p2) != "bbb" || len(s2) != 0 {
+		t.Fatalf("empty sig: ok=%v h=%s p=%s sigLen=%d", ok2, h2, p2, len(s2))
+	}
+}
+
+// TestSplitJWT_Invalid covers rejection of malformed tokens.
+func TestSplitJWT_Invalid(t *testing.T) {
+	invalid := []struct {
+		name  string
+		token string
+	}{
+		{"no dots", "aaabbbccc"},
+		{"one dot", "aaa.bbb"},
+		{"four segments", "a.b.c.d"},
+		{"empty", ""},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, _, ok := splitJWT([]byte(tc.token))
+			if ok {
+				t.Fatalf("splitJWT(%q): expected ok=false", tc.token)
+			}
+		})
+	}
+}
+
+// ── containsScope ────────────────────────────────────────────
+
+func TestContainsScope(t *testing.T) {
+	tests := []struct {
+		scopes string
+		scope  string
+		want   bool
+	}{
+		{"read write admin", "read", true},
+		{"read write admin", "write", true},
+		{"read write admin", "admin", true}, // last element
+		{"read", "read", true},              // single scope
+		{"read write", "admin", false},      // not present
+		{"readonly", "read", false},         // prefix of another scope
+		{"read write", "readonly", false},   // not a scope, only prefix of
+		{"read write", "r", false},          // partial match
+		{"", "read", false},                 // empty scopes
+	}
+	for _, tc := range tests {
+		t.Run(tc.scopes+"/"+tc.scope, func(t *testing.T) {
+			got := containsScope(tc.scopes, tc.scope)
+			if got != tc.want {
+				t.Fatalf("containsScope(%q, %q) = %v, want %v", tc.scopes, tc.scope, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── hasRequiredScopes ────────────────────────────────────────
+
+func TestHasRequiredScopes(t *testing.T) {
+	if !hasRequiredScopes("read write", nil) {
+		t.Error("nil required → always true")
+	}
+	if !hasRequiredScopes("", nil) {
+		t.Error("empty have + nil required → true")
+	}
+	if !hasRequiredScopes("read write", []string{}) {
+		t.Error("empty required slice → true")
+	}
+	if hasRequiredScopes("", []string{"read"}) {
+		t.Error("empty have + non-empty required → false")
+	}
+	if !hasRequiredScopes("read write admin", []string{"read", "admin"}) {
+		t.Error("all required present → true")
+	}
+	if hasRequiredScopes("read write", []string{"read", "admin"}) {
+		t.Error("some required missing → false")
+	}
+	if !hasRequiredScopes("read", []string{"read"}) {
+		t.Error("single required, present → true")
+	}
+	if hasRequiredScopes("readonly", []string{"read"}) {
+		t.Error("scope is prefix of have but not exact match → false")
+	}
+}
+
+// ── claimStringView ──────────────────────────────────────────
+
+func TestClaimStringView(t *testing.T) {
+	// Valid quoted string.
+	if got := claimStringView([]byte(`"hello"`)); got != "hello" {
+		t.Fatalf("quoted: got %q, want %q", got, "hello")
+	}
+	// Empty quoted string.
+	if got := claimStringView([]byte(`""`)); got != "" {
+		t.Fatalf("empty quoted: got %q, want empty", got)
+	}
+	// Unquoted value (JSON number).
+	if got := claimStringView([]byte(`42`)); got != "" {
+		t.Fatalf("unquoted number: got %q, want empty", got)
+	}
+	// JSON array — not a string.
+	if got := claimStringView([]byte(`["a"]`)); got != "" {
+		t.Fatalf("array: got %q, want empty", got)
+	}
+	// Too short (< 3 bytes).
+	if got := claimStringView([]byte(`"a`)); got != "" {
+		t.Fatalf("too short: got %q, want empty", got)
+	}
+	// nil / empty.
+	if got := claimStringView(nil); got != "" {
+		t.Fatalf("nil: got %q, want empty", got)
+	}
+}
+
+// ── scopesFromClaims priority ────────────────────────────────
+
+func TestScopesFromClaims_Priorities(t *testing.T) {
+	// "scope" string beats "scp".
+	c1 := jwtClaims{scope: []byte(`"read admin"`), scp: []byte(`"write"`)}
+	if got := scopesFromClaims(&c1); got != "read admin" {
+		t.Fatalf("scope priority: got %q, want %q", got, "read admin")
+	}
+
+	// "scp" string when "scope" absent.
+	c2 := jwtClaims{scp: []byte(`"read write"`)}
+	if got := scopesFromClaims(&c2); got != "read write" {
+		t.Fatalf("scp string: got %q, want %q", got, "read write")
+	}
+
+	// "scp" array when both scope and scp-string absent.
+	c3 := jwtClaims{scp: []byte(`["read","write"]`)}
+	if got := scopesFromClaims(&c3); got != "read write" {
+		t.Fatalf("scp array: got %q, want %q", got, "read write")
+	}
+
+	// No scopes at all.
+	if got := scopesFromClaims(&jwtClaims{}); got != "" {
+		t.Fatalf("no scopes: got %q, want empty", got)
+	}
+}
+
+// ── OAuthIssuer trailing slash in config ─────────────────────
+
+func TestOAuth_IssuerTrailingSlashInConfig(t *testing.T) {
+	// JWT issued with canonical URL (no trailing slash).
+	// Config has trailing slash — normalizeConfig must strip it.
+	const issuer = "https://issuer.example.com"
+	token := signHS256Token(t,
+		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{
+			"iss": issuer,
+			"sub": "u1",
+			"exp": time.Now().Add(time.Hour).Unix(),
+			"iat": time.Now().Unix(),
+		},
+		"secret",
+	)
+	auth, err := New(&Config{
+		Mode:            ModeOAuth,
+		OAuthIssuer:     issuer + "/", // trailing slash in config
+		OAuthHMACSecret: "secret",
+	}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	r.Header.Set("Authorization", "Bearer "+token)
+	if _, authErr := auth.Authenticate(r); authErr != nil {
+		t.Fatalf("expected success despite trailing slash in config: %v", authErr)
+	}
+}

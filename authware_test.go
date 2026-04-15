@@ -250,3 +250,27 @@ func TestDefaultRealm(t *testing.T) {
 		t.Fatalf("expected 'restricted' realm in header, got %q", header)
 	}
 }
+
+func TestNormalizeConfig_OAuthIssuerTrailingSlash(t *testing.T) {
+	cfg := &Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com/"}
+	normalizeConfig(cfg)
+	if cfg.OAuthIssuer != "https://issuer.example.com" {
+		t.Fatalf("OAuthIssuer = %q, want no trailing slash", cfg.OAuthIssuer)
+	}
+}
+
+func TestNormalizeConfig_OAuthIssuerMultipleTrailingSlashes(t *testing.T) {
+	cfg := &Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com///"}
+	normalizeConfig(cfg)
+	if cfg.OAuthIssuer != "https://issuer.example.com" {
+		t.Fatalf("OAuthIssuer = %q, want trailing slashes stripped", cfg.OAuthIssuer)
+	}
+}
+
+func TestNormalizeConfig_OAuthIssuerNoTrailingSlash(t *testing.T) {
+	cfg := &Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com"}
+	normalizeConfig(cfg)
+	if cfg.OAuthIssuer != "https://issuer.example.com" {
+		t.Fatalf("OAuthIssuer = %q, want unchanged", cfg.OAuthIssuer)
+	}
+}
