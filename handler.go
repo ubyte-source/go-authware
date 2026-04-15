@@ -16,6 +16,10 @@ import (
 // On failure it returns the appropriate HTTP status (401/403) with a
 // WWW-Authenticate header for Bearer-based schemes.
 //
+// Note: the WWW-Authenticate challenge does not include a resource_metadata
+// parameter (RFC 9728). If your nginx configuration requires it, proxy through
+// a handler that calls auth.Challenge with the full resource metadata URL.
+//
 // Nginx configuration example:
 //
 //	location /api {

@@ -19,7 +19,7 @@
 //   - Stampede prevention via serialized refresh with double-check
 //   - RFC 9728 Protected Resource Metadata
 //   - RFC 8414 AS Metadata via OAuth proxy
-//   - RFC 7591 Dynamic Client Registration shim
+//   - RFC 7591-compatible static client registration shim
 //   - Scope validation (scope and scp claims)
 //   - Clock skew tolerance for nbf/iat claims
 //
@@ -71,8 +71,9 @@
 //
 // # OAuth Proxy
 //
-// OAuthProxy bridges MCP clients (e.g. Claude Desktop) with upstream IdPs
-// that don't support RFC 7591 Dynamic Client Registration. It provides
+// OAuthProxy bridges MCP clients that require RFC 7591 Dynamic Client
+// Registration (e.g. Claude Desktop) with upstream IdPs where the application
+// client is pre-registered out-of-band (e.g. Azure AD, Okta). It provides
 // four handlers: ASMetadataHandler, AuthorizeHandler, RegisterHandler,
 // and TokenHandler.
 // All proxy JSON serialization uses go-jsonfast Builder with pooled buffers.
