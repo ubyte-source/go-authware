@@ -58,11 +58,10 @@ type OAuthProxy struct {
 	// computed once at construction to avoid per-request map+Builder allocations.
 	scopesJSON []byte
 	// upstreamScopeStr is the space-separated scope string injected into the
-	// upstream Azure AD / IdP authorization request. It qualifies bare scope
-	// names (e.g. "openobserve") with the resource URI
-	// (e.g. "api://c1e7f8b5-.../openobserve") so the IdP can resolve them.
-	// Empty when no resource URI is configured; in that case the client's
-	// scope parameter is forwarded as-is.
+	// upstream IdP authorization request. It qualifies bare scope names
+	// (e.g. "myapi") with the resource URI (e.g. "api://resource-id/myapi")
+	// so the IdP can resolve them correctly. Empty when no resource URI is
+	// configured; in that case the client's scope parameter is forwarded as-is.
 	upstreamScopeStr string
 	// credentials is the pre-built "client_id=...&client_secret=..." byte slice,
 	// computed once at construction for use in injectClientCredentials.
@@ -130,18 +129,19 @@ func buildScopesJSON(requiredScopes []string) []byte {
 // the upstream IdP's authorization request.
 //
 // Azure AD (and similar IdPs) require custom API scopes to be fully qualified as
-// "{resource_uri}/{scope}" (e.g. "api://c1e7f8b5-.../openobserve"). MCP clients
-// such as Claude discover the short scope name from the server's metadata and may
-// strip the resource prefix before sending the authorization request, causing
-// the IdP to fail with "scope not found on resource".
+// "{resource_uri}/{scope}" (e.g. "api://resource-id/myapi"). MCP clients such as
+// Claude discover the short scope name from the server's metadata and may strip
+// the resource prefix before sending the authorization request, causing the IdP
+// to fail with "scope not found on resource" (Azure AD: AADSTS650053).
 //
 // This function qualifies any bare scope name (no "://" and no "/") with the
 // configured resource URI. Already-qualified scopes (containing "://") are kept
-// as-is. The four standard OIDC scopes are always prepended.
+// as-is. The standard OIDC scopes "openid" and "offline_access" are always
+// prepended.
 //
-// Example: resource="api://abc", scopes=["openobserve"]
+// Example: resource="api://resource-id", scopes=["myapi"]
 //
-//	→ "openid offline_access api://abc/openobserve"
+//	→ "openid offline_access api://resource-id/myapi"
 func buildUpstreamScopeStr(resource string, requiredScopes []string) string {
 	if len(requiredScopes) == 0 {
 		return ""
@@ -289,10 +289,10 @@ func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 //
 // When upstreamScopeStr is set (derived from OAuthResource + OAuthRequiredScopes),
 // it replaces the "scope" query parameter in the redirect. This is necessary
-// because MCP clients such as Claude strip the resource URI prefix from scopes
-// (sending "openobserve" instead of "api://c1e7f8b5-.../openobserve"), which
-// causes Azure AD to look for the scope on Microsoft Graph and fail with
-// AADSTS650053. The proxy re-qualifies the scope before forwarding.
+// because MCP clients may strip the resource URI prefix from scopes (sending
+// "myapi" instead of "api://resource-id/myapi"), which causes Azure AD to look
+// for the scope on Microsoft Graph and fail with AADSTS650053. The proxy
+// re-qualifies the scope before forwarding to the upstream IdP.
 func (p *OAuthProxy) AuthorizeHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p.once.Do(p.fetchUpstream)

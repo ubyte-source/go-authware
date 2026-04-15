@@ -185,7 +185,7 @@ func TestASMetadataHandler_ScopesSupportedIncludesRequiredScopes(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             "id",
-		OAuthRequiredScopes:       []string{"api://c1e7f8b5/.default"},
+		OAuthRequiredScopes:       []string{"api://00000000-0000-0000-0000-000000000001/.default"},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
@@ -214,7 +214,9 @@ func TestASMetadataHandler_ScopesSupportedIncludesRequiredScopes(t *testing.T) {
 		}
 		found[s] = true
 	}
-	for _, want := range []string{"openid", "profile", "email", "offline_access", "api://c1e7f8b5/.default"} {
+	wantScopes := []string{"openid", "profile", "email", "offline_access",
+		"api://00000000-0000-0000-0000-000000000001/.default"}
+	for _, want := range wantScopes {
 		if !found[want] {
 			t.Fatalf("scopes_supported missing %q, got %v", want, arr)
 		}
@@ -805,8 +807,8 @@ func TestBuildUpstreamScopeStr(t *testing.T) {
 	cases := []struct {
 		name     string
 		resource string
-		scopes   []string
 		want     string
+		scopes   []string
 	}{
 		{
 			name:     "no scopes returns empty",
@@ -816,9 +818,9 @@ func TestBuildUpstreamScopeStr(t *testing.T) {
 		},
 		{
 			name:     "qualifies bare scope with resource",
-			resource: "api://c1e7f8b5-e89c-4fbb-90db-69a101e581db",
-			scopes:   []string{"openobserve"},
-			want:     "openid offline_access api://c1e7f8b5-e89c-4fbb-90db-69a101e581db/openobserve",
+			resource: "api://00000000-0000-0000-0000-000000000001",
+			scopes:   []string{"myapi"},
+			want:     "openid offline_access api://00000000-0000-0000-0000-000000000001/myapi",
 		},
 		{
 			name:     "strips trailing slash from resource",
@@ -829,14 +831,14 @@ func TestBuildUpstreamScopeStr(t *testing.T) {
 		{
 			name:     "already-qualified scope not double-qualified",
 			resource: "api://abc",
-			scopes:   []string{"api://abc/openobserve"},
-			want:     "openid offline_access api://abc/openobserve",
+			scopes:   []string{"api://abc/myapi"},
+			want:     "openid offline_access api://abc/myapi",
 		},
 		{
 			name:     "no resource passes scope as-is",
 			resource: "",
-			scopes:   []string{"openobserve"},
-			want:     "openid offline_access openobserve",
+			scopes:   []string{"myapi"},
+			want:     "openid offline_access myapi",
 		},
 		{
 			name:     "deduplicates openid and offline_access if in scopes",
@@ -868,20 +870,20 @@ func TestAuthorizeHandler_RewritesScopeForAzureAD(t *testing.T) {
 
 	// Simulate Azure AD setup: short scope name in OAuthRequiredScopes,
 	// full resource URI in OAuthResource. The handler must qualify the scope
-	// before forwarding to Azure AD.
+	// before forwarding to the upstream IdP.
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "c1e7f8b5-e89c-4fbb-90db-69a101e581db",
-		OAuthRequiredScopes:       []string{"openobserve"},
-		OAuthResource:             "api://c1e7f8b5-e89c-4fbb-90db-69a101e581db",
+		OAuthClientID:             "fake-client-id",
+		OAuthRequiredScopes:       []string{"myapi"},
+		OAuthResource:             "api://00000000-0000-0000-0000-000000000001",
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w0 := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
 
-	// Claude sends the short scope (stripped prefix) — the proxy must fix it.
+	// MCP client sends the short scope (stripped prefix) — the proxy must fix it.
 	w := httptest.NewRecorder()
-	q := "response_type=code&client_id=cid&scope=openid+offline_access+openobserve&state=xyz"
+	q := "response_type=code&client_id=fake-client-id&scope=openid+offline_access+myapi&state=xyz"
 	r := httptest.NewRequest(http.MethodGet, "/authorize?"+q, http.NoBody)
 	p.AuthorizeHandler().ServeHTTP(w, r)
 
@@ -894,7 +896,7 @@ func TestAuthorizeHandler_RewritesScopeForAzureAD(t *testing.T) {
 		t.Fatalf("parse Location: %v", err)
 	}
 	gotScope := parsed.Query().Get("scope")
-	wantScope := "openid offline_access api://c1e7f8b5-e89c-4fbb-90db-69a101e581db/openobserve"
+	wantScope := "openid offline_access api://00000000-0000-0000-0000-000000000001/myapi"
 	if gotScope != wantScope {
 		t.Fatalf("scope in redirect = %q, want %q", gotScope, wantScope)
 	}
@@ -908,18 +910,18 @@ func TestAuthorizeHandler_NoScopeRewriteWhenNoResource(t *testing.T) {
 	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
 	defer fakeAS.Close()
 
-	// No OAuthResource configured: scope is forwarded as-is.
+	// No OAuthResource configured: scope is not resource-qualified.
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             "id",
-		OAuthRequiredScopes:       []string{"openobserve"},
+		OAuthRequiredScopes:       []string{"myapi"},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w0 := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/authorize?scope=openobserve&state=s1", http.NoBody)
+	r := httptest.NewRequest(http.MethodGet, "/authorize?scope=myapi&state=s1", http.NoBody)
 	p.AuthorizeHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusFound {
@@ -930,10 +932,10 @@ func TestAuthorizeHandler_NoScopeRewriteWhenNoResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse Location: %v", err)
 	}
-	// upstreamScopeStr = "openid offline_access openobserve" (no resource → no prefix)
+	// upstreamScopeStr = "openid offline_access myapi" (no resource → no prefix)
 	gotScope := parsed.Query().Get("scope")
-	if !strings.Contains(gotScope, "openobserve") {
-		t.Fatalf("scope %q should contain openobserve", gotScope)
+	if !strings.Contains(gotScope, "myapi") {
+		t.Fatalf("scope %q should contain myapi", gotScope)
 	}
 	if strings.Contains(gotScope, "api://") {
 		t.Fatalf("scope %q should not contain api:// when no resource configured", gotScope)
