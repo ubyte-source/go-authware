@@ -28,7 +28,7 @@
 // When OAuthJWKSURL is not configured, the library automatically discovers
 // the JWKS endpoint by fetching {issuer}/.well-known/openid-configuration.
 // This works with any OIDC-compliant provider: Google, Auth0, Keycloak,
-// Azure AD, Okta, Anthropic, and others.
+// Azure AD, Okta, and others.
 //
 // # Middleware
 //
@@ -42,9 +42,11 @@
 //	))
 //
 // The authenticated identity is stored in the request context and can be
-// retrieved via IdentityFromContext:
+// retrieved via IdentityFromContext. WithIdentity injects an identity
+// manually, which is useful in tests and custom middleware:
 //
-//	id := authware.IdentityFromContext(r.Context())
+//	id, ok := authware.IdentityFromContext(r.Context())
+//	ctx := authware.WithIdentity(r.Context(), id)
 //
 // # Nginx auth_request
 //

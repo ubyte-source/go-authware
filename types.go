@@ -53,12 +53,11 @@ type Identity struct {
 
 // ProtectedResourceMetadata is served from RFC 9728 metadata discovery endpoints.
 type ProtectedResourceMetadata struct {
-	Resource              string   `json:"resource"`
-	ResourceDocumentation string   `json:"resource_documentation,omitempty"`
-	ResourceName          string   `json:"resource_name,omitempty"`
-	AuthorizationServers  []string `json:"authorization_servers,omitempty"`
-	ScopesSupported       []string `json:"scopes_supported,omitempty"`
-
+	Resource               string   `json:"resource"`
+	ResourceDocumentation  string   `json:"resource_documentation,omitempty"`
+	ResourceName           string   `json:"resource_name,omitempty"`
+	AuthorizationServers   []string `json:"authorization_servers,omitempty"`
+	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 	BearerMethodsSupported []string `json:"bearer_methods_supported,omitempty"`
 }
 

@@ -138,12 +138,14 @@ func ExampleNewOAuthProxy() {
 
 	if proxy != nil {
 		mux := http.NewServeMux()
-		mux.HandleFunc("/.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
-		mux.HandleFunc("/oauth/register", proxy.RegisterHandler())
-		mux.HandleFunc("/oauth/token", proxy.TokenHandler())
+		mux.HandleFunc("GET /.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
+		mux.HandleFunc("GET /authorize", proxy.AuthorizeHandler())
+		mux.HandleFunc("POST /register", proxy.RegisterHandler())
+		mux.HandleFunc("POST /token", proxy.TokenHandler())
+		_ = mux
 
 		// Test the DCR shim returns the pre-configured client_id.
-		r := httptest.NewRequest(http.MethodPost, "/oauth/register", http.NoBody)
+		r := httptest.NewRequest(http.MethodPost, "/register", http.NoBody)
 		w := httptest.NewRecorder()
 		proxy.RegisterHandler().ServeHTTP(w, r)
 		fmt.Println(w.Code)
