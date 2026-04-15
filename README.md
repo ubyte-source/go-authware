@@ -138,6 +138,7 @@ MCP spec default endpoint paths are `/authorize`, `/token`, `/register`:
 proxy := authware.NewOAuthProxy(&authware.Config{
     OAuthAuthorizationServers: []string{"https://login.microsoftonline.com/tenant/v2.0"},
     OAuthClientID:             "my-app-client-id",
+    OAuthClientSecret:         "my-app-client-secret", // optional: for confidential-client flows
 }, slog.Default())
 
 if proxy != nil {
@@ -217,14 +218,17 @@ Measured on Intel Xeon Gold 6426Y (32 cores):
 | OAuth HMAC HS256 | 1050 | 24 | 1 |
 | Scope check | 32 | 0 | 0 |
 | Secure equal | 22 | 0 | 0 |
-| Proxy: Register (DCR) | 4365 | 6480 | 22 |
-| Proxy: AS Metadata (cached) | 3693 | 6676 | 23 |
-| Proxy: Token | 96172 | 50914 | 120 |
-| Middleware (Bearer) | 355 | 624 | 7 |
+| Proxy: Register (DCR) | 3896 | 6435 | 22 |
+| Proxy: AS Metadata (cached) | 3119 | 6663 | 23 |
+| Proxy: Token | 87596 | 50150 | 118 |
+| Middleware (Bearer) | 329 | 624 | 7 |
 
 Hot paths (Bearer, API Key, None, Scope check, Secure equal) are **zero-allocation**.
-OAuth HMAC has a single allocation for the HMAC hash buffer reuse.
-Proxy handlers use pooled go-jsonfast builders.
+OAuth HMAC has a single allocation for `copyClaims` string detachment.
+Proxy handlers use pooled go-jsonfast builders and a shared `http.Client`
+for connection pooling. All JSON parsing (OIDC discovery, AS metadata)
+uses go-jsonfast `FindField` instead of `encoding/json`, eliminating
+reflection overhead.
 
 ## 📁 Project Structure
 

@@ -93,12 +93,10 @@ type oauthAuthenticator struct {
 	// 24-byte slice fields.
 	hmacSecret           []byte
 	authorizationServers []string
-	// keysExpiry before requiredScopes so that keysExpiry.loc (pointer at +16)
-	// is not the last pointer field — requiredScopes' data pointer (at +208) is.
-	// This ordering minimizes the GC pointer bitmap to 232 bytes.
+	// Pointer-bearing fields before value fields to minimize the GC pointer bitmap.
 	keysExpiry     time.Time
-	requiredScopes []string // last pointer-containing field
-	// Non-pointer fields last: they fall outside the GC pointer bitmap.
+	requiredScopes []string
+	// Non-pointer fields after all pointer fields.
 	// Lock ordering: mu guards keys+keysExpiry; refreshMu serializes JWKS fetches.
 	mu        sync.RWMutex
 	refreshMu sync.Mutex
@@ -371,13 +369,13 @@ func extractClaims(payload []byte) jwtClaims {
 // jwtClaims field based on the quoted key length and content.
 func extractClaimField(c *jwtClaims, key, value []byte) {
 	switch len(key) {
-	case 5: // 3-char keys: iss, aud, sub, exp, nbf, iat, azp, scp
+	case 5: // 2 quotes + 3 chars: iss, aud, sub, exp, nbf, iat, azp, scp
 		extractClaim3(c, key, value)
-	case 7: // "scope"
+	case 7: // 2 quotes + 5 chars: "scope"
 		if string(key) == `"scope"` {
 			c.scope = value
 		}
-	case 11: // "client_id"
+	case 11: // 2 quotes + 9 chars: "client_id"
 		if string(key) == `"client_id"` {
 			c.clientID = value
 		}
@@ -386,9 +384,12 @@ func extractClaimField(c *jwtClaims, key, value []byte) {
 
 // extractClaim3 handles 3-character JWT claim keys (enclosed in quotes = 5 bytes).
 func extractClaim3(c *jwtClaims, key, value []byte) {
+	// BCE hint: proves key[0..4] are in-bounds, eliminating the three bounds
+	// checks below. The caller guarantees len(key) == 5 (case 5 in extractClaimField).
+	_ = key[4]
 	// Pack the 3-char key into a uint32 for a flat switch.
-	k := uint32(key[1])<<16 | uint32(key[2])<<8 | uint32(key[3])
-	switch k {
+	packed := uint32(key[1])<<16 | uint32(key[2])<<8 | uint32(key[3])
+	switch packed {
 	case 'i'<<16 | 's'<<8 | 's':
 		c.iss = value
 	case 'i'<<16 | 'a'<<8 | 't':
@@ -445,7 +446,8 @@ func validateTimeBound(raw []byte, nowUnix int64, errVal error) error {
 }
 
 // claimStringView returns a zero-allocation string view of a raw JSON string value.
-// The returned string aliases the input slice and must not outlive it.
+// WARNING: the returned string is backed by the pooled decode buffer and must not
+// outlive it — copy the value before returning the buffer to the pool.
 //
 //nolint:gosec // unsafe.String intentional: zero-alloc view into heap-allocated combined buffer
 func claimStringView(raw []byte) string {
@@ -647,7 +649,7 @@ func hashJWT(alg string, signingInput, buf []byte) (crypto.Hash, []byte, error) 
 }
 
 func verifyRSASignature(alg string, key *rsa.PublicKey, hashAlg crypto.Hash, digest, signature []byte) error {
-	if strings.HasPrefix(alg, "PS") {
+	if alg[0] == 'P' {
 		return rsa.VerifyPSS(key, hashAlg, digest, signature, nil)
 	}
 	return rsa.VerifyPKCS1v15(key, hashAlg, digest, signature)
@@ -734,7 +736,7 @@ func (a *oauthAuthenticator) fetchAndParseJWKS(ctx context.Context) (_ map[strin
 	if reqErr != nil {
 		return nil, reqErr
 	}
-	resp, err := a.httpClient.Do(req) //nolint:gosec // G107: req built from operator-configured jwksURL
+	resp, err := a.httpClient.Do(req) //nolint:gosec // G704: operator-configured jwksURL, not user input
 	if err != nil {
 		return nil, err
 	}
@@ -892,6 +894,9 @@ func algFromBytes(data, key []byte) string {
 }
 
 func matchKnownAlg(v []byte) string {
+	// BCE hint: proves v[0..4] are in-bounds, eliminating all per-case checks.
+	// The caller (algFromBytes) guarantees len(v) == 5.
+	_ = v[4]
 	switch {
 	case v[0] == 'H' && v[1] == 'S':
 		return matchAlgVariant(v[4], "HS256", "HS384", "HS512")
@@ -952,7 +957,7 @@ func parseJSONNumber(b []byte) (int64, bool) {
 		if c < '0' || c > '9' {
 			//nolint:gosec // G103: b is a sub-slice of decoded payload, outlives this call.
 			s := unsafe.String(unsafe.SliceData(b), len(b))
-			f, err := parseFloatFast(s)
+			f, err := strconv.ParseFloat(s, 64)
 			if err != nil {
 				return 0, false
 			}
@@ -963,24 +968,12 @@ func parseJSONNumber(b []byte) (int64, bool) {
 	return n, true
 }
 
-// parseFloatFast wraps strconv.ParseFloat, isolated to keep
-// parseJSONNumber's fast path free of allocation overhead.
-func parseFloatFast(s string) (float64, error) {
-	return strconv.ParseFloat(s, 64)
-}
-
 // equalQuotedBytes checks if a raw JSON quoted value equals the given
 // unquoted string, without allocation.
+// string(raw[1:len(raw)-1]) == s is compiled to a direct memcmp (no alloc).
 func equalQuotedBytes(raw []byte, s string) bool {
-	if len(raw) != len(s)+2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
-		return false
-	}
-	for i := range len(s) {
-		if raw[i+1] != s[i] {
-			return false
-		}
-	}
-	return true
+	return len(raw) == len(s)+2 && raw[0] == '"' && raw[len(raw)-1] == '"' &&
+		string(raw[1:len(raw)-1]) == s
 }
 
 // containsAudienceRaw checks audience from raw JSON value.
@@ -1022,13 +1015,14 @@ func hasRequiredScopes(have string, required []string) bool {
 	if len(required) == 0 {
 		return true
 	}
-
+	if have == "" {
+		return false
+	}
 	for _, req := range required {
 		if !containsScope(have, req) {
 			return false
 		}
 	}
-
 	return true
 }
 

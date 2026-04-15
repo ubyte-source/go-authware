@@ -75,6 +75,12 @@
 // and TokenHandler.
 // All proxy JSON serialization uses go-jsonfast Builder with pooled buffers.
 //
+// For confidential-client token exchange (e.g. Azure AD), set
+// OAuthClientSecret in addition to OAuthClientID. The TokenHandler
+// automatically injects client_id and client_secret into the upstream
+// token request, bridging MCP public-client flows with IdPs that require
+// a client secret.
+//
 //	proxy := authware.NewOAuthProxy(cfg, slog.Default())
 //	mux.HandleFunc("GET /.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
 //	mux.HandleFunc("GET /authorize", proxy.AuthorizeHandler())

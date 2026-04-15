@@ -24,6 +24,7 @@ import (
 //   - AUTH_OAUTH_RESOURCE: protected resource identifier (RFC 9728)
 //   - AUTH_OAUTH_RESOURCE_DOCUMENTATION: resource documentation URL
 //   - AUTH_OAUTH_RESOURCE_NAME: human-readable resource name
+//   - AUTH_OAUTH_CLIENT_SECRET: upstream IdP client_secret (confidential client)
 //   - AUTH_OAUTH_AUTHORIZATION_SERVERS: comma-separated authorization server URLs
 func ConfigFromEnv() *Config {
 	return &Config{
@@ -39,6 +40,7 @@ func ConfigFromEnv() *Config {
 		OAuthResource:              os.Getenv("AUTH_OAUTH_RESOURCE"),
 		OAuthResourceDocumentation: os.Getenv("AUTH_OAUTH_RESOURCE_DOCUMENTATION"),
 		OAuthResourceName:          os.Getenv("AUTH_OAUTH_RESOURCE_NAME"),
+		OAuthClientSecret:          os.Getenv("AUTH_OAUTH_CLIENT_SECRET"),
 		OAuthRequiredScopes:        splitCSV(os.Getenv("AUTH_OAUTH_REQUIRED_SCOPES")),
 		OAuthAuthorizationServers:  splitCSV(os.Getenv("AUTH_OAUTH_AUTHORIZATION_SERVERS")),
 	}
@@ -48,11 +50,9 @@ func splitCSV(value string) []string {
 	if value == "" {
 		return nil
 	}
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
+	var result []string
+	for part := range strings.SplitSeq(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
 			result = append(result, part)
 		}
 	}

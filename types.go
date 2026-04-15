@@ -4,28 +4,51 @@ import "net/http"
 
 // Config defines the supported HTTP authentication modes.
 type Config struct {
-	Mode                       string
-	Realm                      string
-	BearerToken                string
-	APIKey                     string
-	APIKeyHeader               string
-	OAuthIssuer                string
-	OAuthAudience              string
-	OAuthJWKSURL               string
-	OAuthHMACSecret            string
-	OAuthResource              string
+	// Mode is the authentication mode: "none", "bearer", "apikey", or "oauth".
+	Mode string
+	// Realm is the realm included in WWW-Authenticate challenges (default: "restricted").
+	Realm string
+	// BearerToken is the expected static bearer token (bearer mode only).
+	BearerToken string
+	// APIKey is the expected static API key value (apikey mode only).
+	APIKey string
+	// APIKeyHeader is the request header that carries the API key (default: "X-API-Key").
+	APIKeyHeader string
+	// OAuthIssuer is the token issuer URL; must match the "iss" claim (oauth mode).
+	OAuthIssuer string
+	// OAuthAudience is the required audience claim; empty means any audience is accepted.
+	OAuthAudience string
+	// OAuthJWKSURL overrides the JWKS endpoint; auto-discovered via OIDC if empty.
+	OAuthJWKSURL string
+	// OAuthHMACSecret enables HMAC (HS256/HS384/HS512) validation with a shared secret.
+	// Intended for testing only; prefer asymmetric keys in production.
+	OAuthHMACSecret string
+	// OAuthResource is the protected resource URI served in RFC 9728 metadata.
+	OAuthResource string
+	// OAuthResourceDocumentation is the URL of the resource documentation,
+	// included in RFC 9728 metadata when non-empty.
 	OAuthResourceDocumentation string
-	OAuthResourceName          string
-	OAuthClientID              string // upstream IdP client_id returned by the built-in DCR shim
-	OAuthRequiredScopes        []string
-	OAuthAuthorizationServers  []string
+	// OAuthResourceName is the human-readable resource name included in RFC 9728 metadata.
+	OAuthResourceName string
+	// OAuthClientID is the upstream IdP client_id returned by the built-in DCR shim.
+	OAuthClientID string
+	// OAuthClientSecret is the upstream IdP client_secret for confidential-client token exchange.
+	OAuthClientSecret string
+	// OAuthRequiredScopes lists the scopes every token must possess.
+	OAuthRequiredScopes []string
+	// OAuthAuthorizationServers lists the authorization server URLs advertised in
+	// RFC 9728 metadata and used for OIDC discovery.
+	OAuthAuthorizationServers []string
 }
 
 // Identity describes the authenticated caller.
 type Identity struct {
+	// Subject is the authenticated principal: the "sub" claim, or "client_id"/"azp" as fallback.
 	Subject string
-	Method  string
-	Scopes  string
+	// Method is the authentication mode that produced this identity (e.g. ModeOAuth, ModeBearer).
+	Method string
+	// Scopes is the space-separated list of OAuth scopes granted to this identity.
+	Scopes string
 }
 
 // ProtectedResourceMetadata is served from RFC 9728 metadata discovery endpoints.

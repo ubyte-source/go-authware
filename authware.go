@@ -39,8 +39,9 @@ func WithIdentity(ctx context.Context, id Identity) context.Context {
 }
 
 // Middleware returns an HTTP middleware that authenticates every request.
-// On success the Identity is stored in the request context; on failure
-// the appropriate HTTP status and challenge header are returned.
+// On success the Identity is stored in the request context via WithIdentity.
+// On failure it writes the WWW-Authenticate challenge header and the
+// appropriate HTTP error status.
 func Middleware(auth Authenticator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
