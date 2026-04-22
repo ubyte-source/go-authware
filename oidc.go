@@ -7,8 +7,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-
-	"github.com/ubyte-source/go-jsonfast"
 )
 
 var (
@@ -21,9 +19,8 @@ type oidcConfiguration struct {
 	JWKSURI string
 }
 
-// discoverOIDC fetches the OIDC discovery document from
-// {issuer}/.well-known/openid-configuration and returns the parsed configuration.
-// Uses jsonfast.FindField instead of encoding/json for zero-reflection parsing.
+// discoverOIDC fetches {issuer}/.well-known/openid-configuration and
+// returns the parsed jwks_uri and issuer.
 func discoverOIDC(ctx context.Context, client *http.Client, issuer string) (_ *oidcConfiguration, err error) {
 	endpoint := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
 	//nolint:gosec // G107: endpoint is derived from operator-configured issuer, never from request input
@@ -47,17 +44,13 @@ func discoverOIDC(ctx context.Context, client *http.Client, issuer string) (_ *o
 	if err != nil {
 		return nil, err
 	}
-	jwksRaw, ok := jsonfast.FindField(body, "jwks_uri")
-	if !ok {
-		return nil, errOIDCMissingJWKSURI
-	}
-	jwksURI := unquote(jwksRaw)
-	if jwksURI == "" {
+	jwksURI, ok := findStringField(body, "jwks_uri")
+	if !ok || jwksURI == "" {
 		return nil, errOIDCMissingJWKSURI
 	}
 	cfg := &oidcConfiguration{JWKSURI: jwksURI}
-	if issuerRaw, found := jsonfast.FindField(body, "issuer"); found {
-		cfg.Issuer = unquote(issuerRaw)
+	if issuer, found := findStringField(body, "issuer"); found {
+		cfg.Issuer = issuer
 	}
 	return cfg, nil
 }

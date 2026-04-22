@@ -1184,24 +1184,6 @@ func TestFormValue(t *testing.T) {
 	}
 }
 
-// ── unquote ──────────────────────────────────────────────────
-
-func TestUnquote(t *testing.T) {
-	if got := unquote([]byte(`"hello"`)); got != "hello" {
-		t.Fatalf("quoted: got %q, want %q", got, "hello")
-	}
-	// Not quoted: returned as-is via string conversion (the non-quoted branch).
-	if got := unquote([]byte(`hello`)); got != "hello" {
-		t.Fatalf("unquoted: got %q, want %q", got, "hello")
-	}
-	if got := unquote([]byte(`""`)); got != "" {
-		t.Fatalf("empty quoted: got %q", got)
-	}
-	if got := unquote(nil); got != "" {
-		t.Fatalf("nil: got %q", got)
-	}
-}
-
 // ── injectClientCredentials ──────────────────────────────────
 
 func TestInjectClientCredentials(t *testing.T) {

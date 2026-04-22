@@ -29,45 +29,28 @@ var (
 	paramAmpersand    = []byte("&")
 )
 
-// OAuthProxy provides HTTP handlers for the MCP 2025-11-25 OAuth facade.
-// It handles AS metadata discovery, a static client registration shim
-// (RFC 7591-compatible compatibility facade), authorization redirect, and
-// token endpoint proxying. This bridges MCP clients that require public-client
-// OAuth with upstream IdPs where the actual application is pre-registered.
-//
-// Bridge model: downstream MCP clients are treated as public clients
-// (no credentials); the proxy optionally acts as a confidential backend
-// by injecting client_id and client_secret into upstream token requests
-// when OAuthClientSecret is configured.
-//
-// Upstream discovery: the authorization and token endpoints are fetched from
-// the upstream IdP's discovery document once, on the first request, using
-// sync.Once. The result is cached for the lifetime of the process. If the
-// upstream IdP rotates its endpoints, the process must be restarted to
-// pick up the new values. This is an intentional trade-off: the vast majority
-// of IdPs (Azure AD, Okta, Google) publish stable, permanent endpoint URLs.
+// OAuthProxy provides HTTP handlers for the MCP OAuth facade: AS
+// metadata discovery, static client registration shim, authorization
+// redirect, and token endpoint proxying. Upstream endpoints are fetched
+// once via sync.Once and cached for the process lifetime.
 type OAuthProxy struct {
 	log                   *slog.Logger
 	clientID              string
-	clientSecret          string   // upstream IdP client_secret; injected into token requests if non-empty
-	requiredScopes        []string // from OAuthRequiredScopes, included in scopes_supported
+	clientSecret          string
+	requiredScopes        []string
 	upstreamTokenEndpoint string
 	upstreamAuthzEndpoint string
 	authorizationServers  []string
-	// scopesJSON is the pre-serialized "scopes_supported" JSON array,
-	// computed once at construction to avoid per-request map+Builder allocations.
+	// scopesJSON is the pre-serialized "scopes_supported" JSON array.
 	scopesJSON []byte
-	// upstreamScopeStr is the space-separated scope string injected into the
-	// upstream IdP authorization request. It qualifies bare scope names
-	// (e.g. "myapi") with the resource URI (e.g. "api://resource-id/myapi")
-	// so the IdP can resolve them correctly. Empty when no resource URI is
-	// configured; in that case the client's scope parameter is forwarded as-is.
+	// upstreamScopeStr qualifies bare scope names with the resource URI
+	// (e.g. "myapi" → "api://resource-id/myapi") for upstream IdP
+	// authorization requests. Empty when no resource URI is configured.
 	upstreamScopeStr string
-	// credentials is the pre-built "client_id=...&client_secret=..." byte slice,
-	// computed once at construction for use in injectClientCredentials.
+	// credentials is the pre-built "client_id=…&client_secret=…" blob.
 	credentials []byte
 	once        sync.Once
-	fetched     bool // true after once.Do completes successfully
+	fetched     bool
 }
 
 // NewOAuthProxy creates an OAuth proxy from the given Config.
@@ -125,23 +108,11 @@ func buildScopesJSON(requiredScopes []string) []byte {
 	return buf.Bytes()
 }
 
-// buildUpstreamScopeStr returns the space-separated scope string to inject into
-// the upstream IdP's authorization request.
-//
-// Azure AD (and similar IdPs) require custom API scopes to be fully qualified as
-// "{resource_uri}/{scope}" (e.g. "api://resource-id/myapi"). MCP clients such as
-// Claude discover the short scope name from the server's metadata and may strip
-// the resource prefix before sending the authorization request, causing the IdP
-// to fail with "scope not found on resource" (Azure AD: AADSTS650053).
-//
-// This function qualifies any bare scope name (no "://" and no "/") with the
-// configured resource URI. Already-qualified scopes (containing "://") are kept
-// as-is. The standard OIDC scopes "openid" and "offline_access" are always
-// prepended.
-//
-// Example: resource="api://resource-id", scopes=["myapi"]
-//
-//	→ "openid offline_access api://resource-id/myapi"
+// buildUpstreamScopeStr returns the space-separated scope string for
+// the upstream IdP authorization request, qualifying bare scope names
+// with the resource URI ("myapi" → "api://resource-id/myapi") as
+// required by Azure AD and similar IdPs. Adds "openid" and
+// "offline_access" unconditionally.
 func buildUpstreamScopeStr(resource string, requiredScopes []string) string {
 	if len(requiredScopes) == 0 {
 		return ""
@@ -157,7 +128,6 @@ func buildUpstreamScopeStr(resource string, requiredScopes []string) string {
 		if s == "" {
 			continue
 		}
-		// Skip if the bare name is already present (e.g. "openid" already added above).
 		if _, dup := seen[s]; dup {
 			continue
 		}
@@ -230,20 +200,10 @@ func (p *OAuthProxy) ASMetadataHandler() http.HandlerFunc {
 	}
 }
 
-// RegisterHandler returns an http.HandlerFunc that acts as a static client
-// registration shim compatible with RFC 7591. It always returns the
-// pre-configured upstream IdP client_id without persisting any client metadata.
-//
-// The redirect_uris field from the request body is echoed back verbatim so
-// that MCP clients know which URI to include in the authorization request.
-// The URIs are not validated here; they must be pre-registered with the
-// upstream IdP out-of-band.
-//
-// This bridges MCP clients that require RFC 7591 Dynamic Client Registration
-// with upstream IdPs where the actual client is pre-registered out-of-band.
-// The MCP client is treated as a public client (token_endpoint_auth_method=none);
-// the proxy optionally acts as a confidential backend by injecting credentials
-// in TokenHandler when OAuthClientSecret is set.
+// RegisterHandler returns a static RFC 7591 client registration shim:
+// always responds with the pre-configured upstream IdP client_id, echoing
+// back the client's redirect_uris. URIs are not validated — they must be
+// pre-registered out-of-band with the upstream IdP.
 func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
@@ -254,9 +214,7 @@ func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 			p.log.Debug("read DCR request body", "err", err)
 		}
 
-		// Echo back the redirect_uris the client sent. RFC 7591 §3.2.1 requires
-		// the registered redirect_uris to appear in the response so the client
-		// knows which URI to use in the authorization request.
+		// RFC 7591 §3.2.1 requires the redirect_uris to appear in the response.
 		redirectURIs := []byte(`[]`)
 		if raw, ok := jsonfast.FindField(body, "redirect_uris"); ok && len(raw) > 0 {
 			redirectURIs = raw
@@ -284,15 +242,9 @@ func (p *OAuthProxy) RegisterHandler() http.HandlerFunc {
 	}
 }
 
-// AuthorizeHandler returns an http.HandlerFunc that redirects the user
-// to the upstream IdP's authorization endpoint.
-//
-// When upstreamScopeStr is set (derived from OAuthResource + OAuthRequiredScopes),
-// it replaces the "scope" query parameter in the redirect. This is necessary
-// because MCP clients may strip the resource URI prefix from scopes (sending
-// "myapi" instead of "api://resource-id/myapi"), which causes Azure AD to look
-// for the scope on Microsoft Graph and fail with AADSTS650053. The proxy
-// re-qualifies the scope before forwarding to the upstream IdP.
+// AuthorizeHandler redirects the user to the upstream IdP authorization
+// endpoint, overriding the "scope" query parameter with upstreamScopeStr
+// (which qualifies bare scope names with the resource URI).
 func (p *OAuthProxy) AuthorizeHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p.once.Do(p.fetchUpstream)
@@ -422,15 +374,10 @@ func (p *OAuthProxy) copyProxyHeaders(w http.ResponseWriter, resp *http.Response
 	}
 }
 
-// injectClientCredentials adds client_id and client_secret to a URL-encoded
-// form body for confidential-client token exchange. The MCP client (e.g.
-// Claude) sends a public-client request without credentials; the proxy injects
-// them before forwarding to the upstream IdP.
-//
-// Uses pure bytes operations (no string round-trip) and the pre-computed
-// p.credentials field to avoid per-call string allocations.
+// injectClientCredentials strips client_id/client_secret from a URL-
+// encoded body and appends the pre-computed p.credentials, enabling
+// confidential-client token exchange on behalf of a public MCP client.
 func (p *OAuthProxy) injectClientCredentials(body []byte) []byte {
-	// Split in-place: reuse the backing array of parts for the output slice.
 	parts := bytes.Split(body, paramAmpersand)
 	out := parts[:0]
 	for _, part := range parts {
@@ -484,38 +431,27 @@ func (p *OAuthProxy) fetchUpstreamMeta(urls []string) *upstreamMeta {
 }
 
 // parseUpstreamMeta extracts issuer, authorization_endpoint, and
-// token_endpoint from a raw JSON discovery document using jsonfast,
-// avoiding encoding/json.Unmarshal and its reflection overhead.
+// token_endpoint from a raw JSON discovery document.
 func parseUpstreamMeta(data []byte) *upstreamMeta {
-	issuer, ok := jsonfast.FindField(data, "issuer")
-	if !ok {
+	issuer, ok1 := findStringField(data, "issuer")
+	authz, ok2 := findStringField(data, "authorization_endpoint")
+	token, ok3 := findStringField(data, "token_endpoint")
+	if !ok1 || !ok2 || !ok3 || issuer == "" || authz == "" || token == "" {
 		return nil
 	}
-	authz, ok := jsonfast.FindField(data, "authorization_endpoint")
-	if !ok {
-		return nil
+	return &upstreamMeta{
+		Issuer:                issuer,
+		AuthorizationEndpoint: authz,
+		TokenEndpoint:         token,
 	}
-	token, ok := jsonfast.FindField(data, "token_endpoint")
-	if !ok {
-		return nil
-	}
-	um := &upstreamMeta{
-		Issuer:                unquote(issuer),
-		AuthorizationEndpoint: unquote(authz),
-		TokenEndpoint:         unquote(token),
-	}
-	if um.Issuer == "" || um.AuthorizationEndpoint == "" || um.TokenEndpoint == "" {
-		return nil
-	}
-	return um
 }
 
-// unquote removes surrounding double quotes from a JSON string value.
-func unquote(b []byte) string {
-	if len(b) >= 2 && b[0] == '"' && b[len(b)-1] == '"' {
-		return string(b[1 : len(b)-1])
+func findStringField(data []byte, key string) (string, bool) {
+	raw, ok := jsonfast.FindField(data, key)
+	if !ok {
+		return "", false
 	}
-	return string(b)
+	return jsonfast.DecodeString(raw)
 }
 
 // fetchUpstream iterates p.authorizationServers in order, fetching the first

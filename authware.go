@@ -38,15 +38,10 @@ func WithIdentity(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, contextKey{}, id)
 }
 
-// Middleware returns an HTTP middleware that authenticates every request.
-// On success the Identity is stored in the request context via WithIdentity.
-// On failure it writes the WWW-Authenticate challenge header and the
-// appropriate HTTP error status.
-//
-// Note: the WWW-Authenticate challenge does not include a resource_metadata
-// parameter (RFC 9728) because the server's base URL is not known at
-// middleware construction time. To include resource_metadata, write a custom
-// middleware that calls auth.Challenge with the appropriate URL.
+// Middleware authenticates every request, storing the Identity in the
+// request context on success. The WWW-Authenticate challenge omits the
+// resource_metadata parameter (RFC 9728); callers needing it should
+// write a custom middleware around auth.Challenge.
 func Middleware(auth Authenticator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +63,6 @@ func Middleware(auth Authenticator) func(http.Handler) http.Handler {
 // identity (from context) possesses all the specified scopes.
 // Must be applied after Middleware.
 func RequireScopes(scopes ...string) func(http.Handler) http.Handler {
-	// Sort once at construction for deterministic error messages.
 	sorted := make([]string, len(scopes))
 	copy(sorted, scopes)
 	slices.Sort(sorted)
@@ -133,8 +127,6 @@ func normalizeConfig(cfg *Config) {
 		cfg.APIKeyHeader = defaultKeyHeaderName
 	}
 	cfg.APIKeyHeader = http.CanonicalHeaderKey(cfg.APIKeyHeader)
-	// Strip trailing slashes so "https://issuer.example.com/" and
-	// "https://issuer.example.com" are treated as the same issuer.
 	cfg.OAuthIssuer = strings.TrimRight(cfg.OAuthIssuer, "/")
 	cfg.OAuthRequiredScopes = cleanValues(cfg.OAuthRequiredScopes)
 	cfg.OAuthAuthorizationServers = cleanValues(cfg.OAuthAuthorizationServers)

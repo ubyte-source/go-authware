@@ -90,13 +90,10 @@ type oauthAuthenticator struct {
 	jwksURL               string
 	resourceDocumentation string
 	resourceName          string
-	// 24-byte slice fields.
-	hmacSecret           []byte
-	authorizationServers []string
-	// Pointer-bearing fields before value fields to minimize the GC pointer bitmap.
-	keysExpiry     time.Time
-	requiredScopes []string
-	// Non-pointer fields after all pointer fields.
+	hmacSecret            []byte
+	authorizationServers  []string
+	keysExpiry            time.Time
+	requiredScopes        []string
 	// Lock ordering: mu guards keys+keysExpiry; refreshMu serializes JWKS fetches.
 	mu        sync.RWMutex
 	refreshMu sync.Mutex
@@ -384,10 +381,7 @@ func extractClaimField(c *jwtClaims, key, value []byte) {
 
 // extractClaim3 handles 3-character JWT claim keys (enclosed in quotes = 5 bytes).
 func extractClaim3(c *jwtClaims, key, value []byte) {
-	// BCE hint: proves key[0..4] are in-bounds, eliminating the three bounds
-	// checks below. The caller guarantees len(key) == 5 (case 5 in extractClaimField).
-	_ = key[4]
-	// Pack the 3-char key into a uint32 for a flat switch.
+	_ = key[4] // BCE hint: caller guarantees len(key) == 5.
 	packed := uint32(key[1])<<16 | uint32(key[2])<<8 | uint32(key[3])
 	switch packed {
 	case 'i'<<16 | 's'<<8 | 's':
