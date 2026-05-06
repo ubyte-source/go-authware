@@ -37,15 +37,20 @@ linters:
     - prealloc
     - forbidigo
     - gomoddirectives
-    - gomodguard
+    - gomodguard_v2
     - nolintlint
+    - canonicalheader
+    - exhaustive
+    - intrange
+    - mirror
+    - modernize
+    - perfsprint
+    - usestdlibvars
+    - usetesting
   exclusions:
     presets: []
     generated: lax
-    rules:
-      - path: _test\.go
-        linters:
-          - goconst
+    rules: []
   settings:
     # ERRCHECK - check ALL errors
     errcheck:
@@ -156,7 +161,7 @@ linters:
 
     misspell:
       locale: US
-
+  
     nakedret:
       max-func-lines: 5
 

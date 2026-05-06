@@ -11,33 +11,105 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
+	"io"
 	"math/big"
 	"net/http"
+	"net/url"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"github.com/ubyte-source/go-jsonfast"
 )
 
-const (
-	jwksCacheTTL          = 5 * time.Minute
-	jwtClockSkewTolerance = 30 * time.Second
-	jwtClockSkewSec       = int64(jwtClockSkewTolerance / time.Second)
+func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, limit))
+}
 
-	// maxJWTSize limits the maximum JWT token length to prevent
-	// denial-of-service via oversized tokens.
+// requireHTTPS rejects URLs that are neither https:// nor http:// to a
+// loopback host. Plaintext delivery of signing material is an attacker-
+// controlled substitution risk under MITM.
+func requireHTTPS(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%w: %q", errInsecureURLScheme, raw)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %q", errInsecureURLScheme, raw)
+}
+
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
+
+const (
+	defaultJWKSCacheTTL  = 5 * time.Minute
+	defaultJWTClockSkew  = 30 * time.Second
+	jwtClockSkewSec      = int64(defaultJWTClockSkew / time.Second)
+	jwksNegativeCacheTTL = 30 * time.Second
+	jwksMaxBodyBytes     = 1 << 20
+	rsaMaxModulusBits    = 8192
+
+	// maxJWTSize caps inbound token length to bound DoS via oversized tokens.
 	maxJWTSize = 16384
 
-	// maxCombinedBuf is the maximum size for the pooled decode buffer.
-	// Covers the decoded form of the largest allowed JWT plus HMAC space.
+	// maxCombinedBuf sizes the pooled scratch buffer for signature,
+	// payload and digest decoded from a maximally-sized JWT.
 	maxCombinedBuf = maxJWTSize*3/4 + sha512.Size + 4
+
+	// minRSAExponent and minRSAModulusBits set the floor for accepted
+	// RSA keys: smaller values are weak.
+	minRSAExponent    = 65537
+	minRSAModulusBits = 2048
+)
+
+const (
+	algHS256 = "HS256"
+	algHS384 = "HS384"
+	algHS512 = "HS512"
+	algRS256 = "RS256"
+	algRS384 = "RS384"
+	algRS512 = "RS512"
+	algES256 = "ES256"
+	algES384 = "ES384"
+	algES512 = "ES512"
+	algPS256 = "PS256"
+	algPS384 = "PS384"
+	algPS512 = "PS512"
+)
+
+const (
+	jwkTypeRSA = "RSA"
+	jwkTypeEC  = "EC"
+	jwkCrvP256 = "P-256"
+	jwkCrvP384 = "P-384"
+	jwkCrvP521 = "P-521"
+)
+
+const (
+	typJWT    = "JWT"
+	typAtJWT  = "at+jwt"
+	typAppJWT = "application/jwt"
+	typAppAt  = "application/at+jwt"
 )
 
 var _ Authenticator = (*oauthAuthenticator)(nil)
@@ -49,64 +121,80 @@ var (
 	errUnsupportedKeyType  = errors.New("unsupported JWT public key type")
 	errUnsupportedCurve    = errors.New("unsupported elliptic curve")
 	errJWKSEndpoint        = errors.New("jwks endpoint error")
+	errJWKSPayloadInvalid  = errors.New("invalid JWKS payload")
+	errRSAExponentWeak     = errors.New("RSA public exponent below minimum (65537)")
+	errRSAModulusWeak      = errors.New("RSA modulus below minimum (2048 bits)")
+	errRSAModulusTooLarge  = errors.New("RSA modulus exceeds maximum")
+	errInsecureURLScheme   = errors.New("URL scheme must be https")
 )
 
-// Pre-allocated auth errors returned on the JWT validation hot path.
 var (
-	errMalformedJWT       = unauthorizedError("malformed JWT")
-	errInvalidJWTHeader   = unauthorizedError("invalid JWT header")
-	errInvalidJWTSigEnc   = unauthorizedError("invalid JWT signature encoding")
-	errInvalidJWTClaims   = unauthorizedError("invalid JWT claims")
-	errMissingBearerToken = unauthorizedError("missing bearer token")
-	errInvalidIssuer      = unauthorizedError("invalid token issuer")
-	errInvalidAudience    = unauthorizedError("invalid token audience")
-	errTokenExpired       = unauthorizedError("token expired")
-	errTokenNotYetValid   = unauthorizedError("token not yet valid")
-	errTokenFromFuture    = unauthorizedError("token issued in the future")
+	errMalformedJWT       = unauthorisedError("malformed JWT")
+	errInvalidJWTHeader   = unauthorisedError("invalid JWT header")
+	errInvalidJWTSigEnc   = unauthorisedError("invalid JWT signature encoding")
+	errInvalidJWTClaims   = unauthorisedError("invalid JWT claims")
+	errMissingBearerToken = unauthorisedError("missing bearer token")
+	errInvalidIssuer      = unauthorisedError("invalid token issuer")
+	errInvalidAudience    = unauthorisedError("invalid token audience")
+	errTokenExpired       = unauthorisedError("token expired")
+	errTokenNotYetValid   = unauthorisedError("token not yet valid")
+	errTokenFromFuture    = unauthorisedError("token issued in the future")
+	errMissingExpClaim    = unauthorisedError("missing exp claim")
+	errMalformedTimeClaim = unauthorisedError("malformed JWT time claim")
+
+	errSignatureVerifyFailed = unauthorisedError("invalid JWT signature")
+	errUnsupportedAlgAuth    = unauthorisedError("unsupported JWT algorithm")
+	errUnsupportedKeyAuth    = unauthorisedError("unsupported JWT public key type")
+	errNoKeyAuth             = unauthorisedError("no JWT verification key found")
+	errInternalAuth          = unauthorisedError("internal authentication error")
+	errCriticalHeader        = unauthorisedError("unsupported critical JWT header")
+	errInvalidJWTType        = unauthorisedError("invalid JWT typ header")
 )
 
-// Pre-allocated auth errors for signature verification.
-var (
-	errSignatureVerifyFailed = unauthorizedError("invalid JWT signature")
-	errUnsupportedAlgAuth    = unauthorizedError("unsupported JWT algorithm")
-	errUnsupportedKeyAuth    = unauthorizedError("unsupported JWT public key type")
-	errNoKeyAuth             = unauthorizedError("no JWT verification key found")
-	errInternalAuth          = unauthorizedError("internal authentication error")
-)
+// keysSnapshot is the immutable JWKS view published via atomic.Pointer.
+type keysSnapshot struct {
+	keys   map[string]jwkPublicKey
+	expiry time.Time
+}
+
+// keysFetchCall lets concurrent callers share a single in-flight refresh.
+type keysFetchCall struct {
+	done chan struct{}
+	snap *keysSnapshot
+	err  error
+}
 
 type oauthAuthenticator struct {
-	// 8-byte pointer fields first.
-	httpClient *http.Client
-	keys       map[string]jwkPublicKey
-	// hmacPools is non-nil only in HMAC mode; 0=HS256, 1=HS384, 2=HS512.
-	// A pointer avoids embedding 3×40-byte sync.Pool values inline.
-	hmacPools            *[3]sync.Pool
-	insufficientScopeErr error // pre-computed; avoids strings.Join + alloc per rejection
-	// 16-byte string fields.
-	resource              string
-	realm                 string
-	issuer                string
+	insufficientScopeErr  error
+	keys                  atomic.Pointer[keysSnapshot]
+	hmacPools             *[3]sync.Pool
+	inflight              atomic.Pointer[keysFetchCall]
+	jwksURLAtomic         atomic.Pointer[string]
+	httpClient            *http.Client
 	audience              string
 	jwksURL               string
 	resourceDocumentation string
 	resourceName          string
+	issuer                string
+	realm                 string
+	resource              string
 	hmacSecret            []byte
-	authorizationServers  []string
-	keysExpiry            time.Time
 	requiredScopes        []string
-	// Lock ordering: mu guards keys+keysExpiry; refreshMu serializes JWKS fetches.
-	mu        sync.RWMutex
-	refreshMu sync.Mutex
+	authorizationServers  []string
+	failedUntilNanos      atomic.Int64
+	cacheTTL              time.Duration
+	skewSec               int64
+	refreshMu             sync.Mutex
 }
 
-// Hash pools for asymmetric (RSA/EC) signature verification.
 var (
 	jwtSHA256Pool = sync.Pool{New: func() any { return sha256.New() }}
 	jwtSHA384Pool = sync.Pool{New: func() any { return sha512.New384() }}
 	jwtSHA512Pool = sync.Pool{New: func() any { return sha512.New() }}
 )
 
-// decodeBuf is a pooled byte buffer; the struct wrapper avoids interface boxing.
+// decodeBuf wraps a byte buffer to avoid the interface boxing that a
+// raw []byte would incur in a sync.Pool.
 type decodeBuf struct {
 	b []byte
 }
@@ -115,23 +203,40 @@ var combinedPool = sync.Pool{New: func() any {
 	return &decodeBuf{b: make([]byte, maxCombinedBuf)}
 }}
 
-var (
-	jwtKeyAlg = []byte(`"alg":"`)
-	jwtKeyKid = []byte(`"kid":"`)
-)
-
 type jwkPublicKey struct {
 	key any
 	alg string
 }
 
 type jwtHeader struct {
-	Alg string `json:"alg"`
-	Kid string `json:"kid,omitempty"`
+	Alg  string
+	Kid  string
+	Typ  string
+	Crit bool
 }
 
-// jwtClaims holds raw byte slices from a single-pass JSON scan of the payload.
-// All slices alias the decoded payload buffer — zero-copy extraction.
+// extractMask records which standard claims have been seen so the
+// scanner can short-circuit once every field is in hand.
+type extractMask uint16
+
+const (
+	maskISS extractMask = 1 << iota
+	maskAUD
+	maskSUB
+	maskClientID
+	maskAZP
+	maskScope
+	maskSCP
+	maskEXP
+	maskNBF
+	maskIAT
+
+	maskAll = maskISS | maskAUD | maskSUB | maskClientID | maskAZP |
+		maskScope | maskSCP | maskEXP | maskNBF | maskIAT
+)
+
+// jwtClaims holds raw byte slices produced by a single-pass JSON scan
+// of the payload. Slices alias the decoded payload buffer.
 type jwtClaims struct {
 	iss      []byte
 	aud      []byte
@@ -145,24 +250,9 @@ type jwtClaims struct {
 	iat      []byte
 }
 
-type jwkSet struct {
-	Keys []jwk `json:"keys"`
-}
-
-type jwk struct {
-	Alg string `json:"alg,omitempty"`
-	Crv string `json:"crv,omitempty"`
-	E   string `json:"e,omitempty"`
-	Kid string `json:"kid,omitempty"`
-	Kty string `json:"kty"`
-	N   string `json:"n,omitempty"`
-	X   string `json:"x,omitempty"`
-	Y   string `json:"y,omitempty"`
-}
-
-// authorizationServersForMode returns a defensive copy of servers in
-// non-proxy mode, or nil in proxy mode (clientID set) so the transport
-// fills authorization_servers from the request origin at runtime.
+// authorizationServersForMode returns a defensive copy of servers when
+// running as a resource server; in proxy mode (clientID set) returns
+// nil so the metadata document is filled from the request origin.
 func authorizationServersForMode(servers []string, clientID string) []string {
 	if clientID != "" {
 		return nil
@@ -179,7 +269,19 @@ func newOAuthAuthenticator(cfg *Config, client *http.Client) (Authenticator, err
 		servers = []string{cfg.OAuthIssuer}
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+		if cfg.OAuthHTTPClient != nil {
+			client = cfg.OAuthHTTPClient
+		} else {
+			client = &http.Client{Timeout: 5 * time.Second}
+		}
+	}
+	cacheTTL := cfg.OAuthJWKSCacheTTL
+	if cacheTTL <= 0 {
+		cacheTTL = defaultJWKSCacheTTL
+	}
+	skew := cfg.OAuthClockSkewTolerance
+	if skew <= 0 {
+		skew = defaultJWTClockSkew
 	}
 	secret := []byte(cfg.OAuthHMACSecret)
 	o := &oauthAuthenticator{
@@ -194,6 +296,12 @@ func newOAuthAuthenticator(cfg *Config, client *http.Client) (Authenticator, err
 		hmacSecret:            secret,
 		requiredScopes:        append([]string(nil), cfg.OAuthRequiredScopes...),
 		authorizationServers:  authorizationServersForMode(servers, cfg.OAuthClientID),
+		cacheTTL:              cacheTTL,
+		skewSec:               int64(skew / time.Second),
+	}
+	if cfg.OAuthJWKSURL != "" {
+		s := cfg.OAuthJWKSURL
+		o.jwksURLAtomic.Store(&s)
 	}
 	if len(secret) > 0 {
 		pools := &[3]sync.Pool{}
@@ -208,32 +316,27 @@ func newOAuthAuthenticator(cfg *Config, client *http.Client) (Authenticator, err
 	return o, nil
 }
 
-func (a *oauthAuthenticator) Authenticate(r *http.Request) (Identity, error) {
+func (a *oauthAuthenticator) Authenticate(r *http.Request) (*Identity, error) {
 	v := r.Header["Authorization"]
 	if len(v) == 0 {
-		return Identity{}, errMissingBearerToken
+		return nil, errMissingBearerToken
 	}
-
-	token, ok := bearerToken(v[0])
+	token, ok := parseAuthScheme(v[0], "bearer")
 	if !ok {
-		return Identity{}, errMissingBearerToken
+		return nil, errMissingBearerToken
 	}
-
-	now := time.Now()
-
-	subject, scopes, err := a.validateToken(r.Context(), token, now)
+	subject, scopes, claimsRaw, err := a.validateToken(r.Context(), token, time.Now())
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
-
 	if !hasRequiredScopes(scopes, a.requiredScopes) {
-		return Identity{}, a.insufficientScopeErr
+		return nil, a.insufficientScopeErr
 	}
-
-	return Identity{
-		Subject: subject,
-		Method:  ModeOAuth,
-		Scopes:  scopes,
+	return &Identity{
+		Subject:   subject,
+		Method:    ModeOAuth,
+		Scopes:    scopes,
+		claimsRaw: claimsRaw,
 	}, nil
 }
 
@@ -248,13 +351,9 @@ func (a *oauthAuthenticator) Metadata(resource string) *ProtectedResourceMetadat
 	if resource == "" {
 		return nil
 	}
-	// When authorizationServers is nil the MCP server IS the authorization
-	// server (proxy mode).  Leave the field empty so the transport fills it
-	// from the request origin (it cannot be known at config time).
-	servers := append([]string(nil), a.authorizationServers...)
 	return &ProtectedResourceMetadata{
 		Resource:               resource,
-		AuthorizationServers:   servers,
+		AuthorizationServers:   append([]string(nil), a.authorizationServers...),
 		ScopesSupported:        append([]string(nil), a.requiredScopes...),
 		BearerMethodsSupported: []string{"header"},
 		ResourceDocumentation:  a.resourceDocumentation,
@@ -262,9 +361,8 @@ func (a *oauthAuthenticator) Metadata(resource string) *ProtectedResourceMetadat
 	}
 }
 
-// splitJWT splits a raw JWT byte slice into its three base64url-encoded parts
-// and the signingInput (header.payload). Returns false if the token doesn't
-// have exactly three dot-separated segments.
+// splitJWT splits a raw JWT into its three base64url-encoded parts plus
+// the signing input (header.payload).
 func splitJWT(data []byte) (header, payload, sig, signingInput []byte, ok bool) {
 	dot1 := bytes.IndexByte(data, '.')
 	if dot1 < 0 {
@@ -282,247 +380,353 @@ func splitJWT(data []byte) (header, payload, sig, signingInput []byte, ok bool) 
 	return data[:dot1], data[dot1+1 : dot2], data[dot2+1:], data[:dot2], true
 }
 
-// validateToken validates a JWT and returns the subject and scopes.
 func (a *oauthAuthenticator) validateToken(
 	ctx context.Context, token string, now time.Time,
-) (subject, scopes string, retErr error) {
+) (subject string, scopes []string, claimsRaw string, err error) {
 	if len(token) > maxJWTSize {
-		return "", "", errMalformedJWT
+		return "", nil, "", errMalformedJWT
 	}
 
-	//nolint:gosec // G103: read-only alias of immutable string backing memory.
+	// Zero-allocation byte view of the immutable token; KeepAlive at
+	// the end pins the string for the duration of the function.
+	//nolint:gosec // immutable string alias; KeepAlive at end.
 	data := unsafe.Slice(unsafe.StringData(token), len(token))
 
 	headerBytes, payloadBytes, sigBytes, signingInput, ok := splitJWT(data)
 	if !ok {
-		return "", "", errMalformedJWT
+		return "", nil, "", errMalformedJWT
 	}
+	header, hdrErr := parseAndValidateHeader(headerBytes)
+	if hdrErr != nil {
+		return "", nil, "", hdrErr
+	}
+	subject, scopes, claimsRaw, err = a.verifyAndDecode(ctx, header, payloadBytes, sigBytes, signingInput, now.Unix())
+	runtime.KeepAlive(token)
+	return subject, scopes, claimsRaw, err
+}
 
-	header, err := parseJWTHeaderDirect(headerBytes)
+func parseAndValidateHeader(headerBytes []byte) (jwtHeader, error) {
+	header, err := parseJWTHeader(headerBytes)
 	if err != nil {
-		return "", "", errInvalidJWTHeader
+		return jwtHeader{}, errInvalidJWTHeader
 	}
+	if header.Crit {
+		return jwtHeader{}, errCriticalHeader
+	}
+	if !validJWTType(header.Typ) {
+		return jwtHeader{}, errInvalidJWTType
+	}
+	return header, nil
+}
 
-	// Combined buffer: signature decode + payload decode + HMAC sum space.
+func (a *oauthAuthenticator) verifyAndDecode(
+	ctx context.Context, header jwtHeader, payloadBytes, sigBytes, signingInput []byte, nowUnix int64,
+) (subject string, scopes []string, claimsRaw string, err error) {
 	sigDecLen := base64.RawURLEncoding.DecodedLen(len(sigBytes))
 	payDecLen := base64.RawURLEncoding.DecodedLen(len(payloadBytes))
 	needed := sigDecLen + payDecLen + sha512.Size
 
 	db, ok := combinedPool.Get().(*decodeBuf)
 	if !ok {
-		return "", "", errInternalAuth
+		return "", nil, "", errInternalAuth
 	}
+	defer combinedPool.Put(db)
+
 	combined := db.b[:needed]
 	sigBuf := combined[:sigDecLen]
 	payBuf := combined[sigDecLen : sigDecLen+payDecLen]
 	sumBuf := combined[sigDecLen+payDecLen:]
 
-	sigLen, err := base64.RawURLEncoding.Decode(sigBuf, sigBytes)
-	if err != nil {
-		combinedPool.Put(db)
-		return "", "", errInvalidJWTSigEnc
+	sigLen, decErr := base64.RawURLEncoding.Decode(sigBuf, sigBytes)
+	if decErr != nil {
+		return "", nil, "", errInvalidJWTSigEnc
 	}
-
 	if sigErr := a.verifySignature(ctx, header.Alg, header.Kid, signingInput, sigBuf[:sigLen], sumBuf); sigErr != nil {
-		combinedPool.Put(db)
-		return "", "", sigErr
+		return "", nil, "", sigErr
 	}
 
-	n, err := base64.RawURLEncoding.Decode(payBuf, payloadBytes)
-	if err != nil {
-		combinedPool.Put(db)
-		return "", "", errInvalidJWTClaims
+	n, decErr := base64.RawURLEncoding.Decode(payBuf, payloadBytes)
+	if decErr != nil {
+		return "", nil, "", errInvalidJWTClaims
 	}
-
-	claims := extractClaims(payBuf[:n])
-
-	if err := a.validateClaimsFromParsed(&claims, now.Unix()); err != nil {
-		combinedPool.Put(db)
-		return "", "", err
+	payload := payBuf[:n]
+	parsed := extractClaims(payload)
+	if vErr := a.validateClaimsFromParsed(&parsed, nowUnix); vErr != nil {
+		return "", nil, "", vErr
 	}
-
-	// Copy claims before returning the pooled buffer.
-	subject, scopes = copyClaims(
-		subjectFromClaims(&claims),
-		scopesFromClaims(&claims),
-	)
-	combinedPool.Put(db)
-
-	return subject, scopes, nil
+	return decodeAndDetach(subjectFromClaims(&parsed)), detachScopes(&parsed), string(payload), nil
 }
 
-// extractClaims performs a single-pass JSON scan of the payload,
-// extracting all needed JWT claims as raw byte slices.
-func extractClaims(payload []byte) jwtClaims {
-	var c jwtClaims
-	jsonfast.IterateFields(payload, func(key, value []byte) bool {
-		extractClaimField(&c, key, value)
+func validJWTType(typ string) bool {
+	if typ == "" {
 		return true
-	})
-	return c
+	}
+	switch typ {
+	case typJWT, "jwt", typAtJWT, "AT+JWT", typAppJWT, typAppAt:
+		return true
+	}
+	return false
 }
 
-// extractClaimField dispatches a single key-value pair to the appropriate
-// jwtClaims field based on the quoted key length and content.
-func extractClaimField(c *jwtClaims, key, value []byte) {
+// claimsAccumulator bundles the claims-under-construction with its
+// presence mask so the extractor closure captures one pointer.
+type claimsAccumulator struct {
+	c    jwtClaims
+	seen extractMask
+}
+
+func extractClaims(payload []byte) jwtClaims {
+	var acc claimsAccumulator
+	jsonfast.IterateFields(payload, func(key, value []byte) bool {
+		extractClaimField(&acc, key, value)
+		return acc.seen != maskAll
+	})
+	return acc.c
+}
+
+func extractClaimField(acc *claimsAccumulator, key, value []byte) {
 	switch len(key) {
-	case 5: // 2 quotes + 3 chars: iss, aud, sub, exp, nbf, iat, azp, scp
-		extractClaim3(c, key, value)
-	case 7: // 2 quotes + 5 chars: "scope"
+	case 5:
+		extractClaim3(acc, key, value)
+	case 7:
 		if string(key) == `"scope"` {
-			c.scope = value
+			acc.c.scope = value
+			acc.seen |= maskScope
 		}
-	case 11: // 2 quotes + 9 chars: "client_id"
+	case 11:
 		if string(key) == `"client_id"` {
-			c.clientID = value
+			acc.c.clientID = value
+			acc.seen |= maskClientID
 		}
 	}
 }
 
-// extractClaim3 handles 3-character JWT claim keys (enclosed in quotes = 5 bytes).
-func extractClaim3(c *jwtClaims, key, value []byte) {
-	_ = key[4] // BCE hint: caller guarantees len(key) == 5.
+// extractClaim3 dispatches three-character JWT claim keys (5 bytes
+// including surrounding quotes) by packing the body into a uint32.
+func extractClaim3(acc *claimsAccumulator, key, value []byte) {
 	packed := uint32(key[1])<<16 | uint32(key[2])<<8 | uint32(key[3])
 	switch packed {
 	case 'i'<<16 | 's'<<8 | 's':
-		c.iss = value
+		acc.c.iss = value
+		acc.seen |= maskISS
 	case 'i'<<16 | 'a'<<8 | 't':
-		c.iat = value
+		acc.c.iat = value
+		acc.seen |= maskIAT
 	case 'a'<<16 | 'u'<<8 | 'd':
-		c.aud = value
+		acc.c.aud = value
+		acc.seen |= maskAUD
 	case 'a'<<16 | 'z'<<8 | 'p':
-		c.azp = value
+		acc.c.azp = value
+		acc.seen |= maskAZP
 	case 's'<<16 | 'u'<<8 | 'b':
-		c.sub = value
+		acc.c.sub = value
+		acc.seen |= maskSUB
 	case 's'<<16 | 'c'<<8 | 'p':
-		c.scp = value
+		acc.c.scp = value
+		acc.seen |= maskSCP
 	case 'e'<<16 | 'x'<<8 | 'p':
-		c.exp = value
+		acc.c.exp = value
+		acc.seen |= maskEXP
 	case 'n'<<16 | 'b'<<8 | 'f':
-		c.nbf = value
+		acc.c.nbf = value
+		acc.seen |= maskNBF
 	}
 }
 
-// validateClaimsFromParsed validates JWT claims from pre-extracted raw fields.
-// nowUnix is the current time as a Unix timestamp to avoid time.Time construction.
 func (a *oauthAuthenticator) validateClaimsFromParsed(c *jwtClaims, nowUnix int64) error {
 	if !equalQuotedBytes(c.iss, a.issuer) {
 		return errInvalidIssuer
 	}
-
 	if a.audience != "" && !containsAudienceRaw(c.aud, a.audience) {
 		return errInvalidAudience
 	}
-
-	exp, ok := parseJSONNumber(c.exp)
-	if !ok || nowUnix > exp {
+	if len(c.exp) == 0 {
+		return errMissingExpClaim
+	}
+	exp, ok := decodeNumericTime(c.exp)
+	if !ok {
+		return errMalformedTimeClaim
+	}
+	if nowUnix > exp {
 		return errTokenExpired
 	}
-
-	if err := validateTimeBound(c.nbf, nowUnix, errTokenNotYetValid); err != nil {
+	if err := a.validateTimeBound(c.nbf, nowUnix, errTokenNotYetValid); err != nil {
 		return err
 	}
-
-	return validateTimeBound(c.iat, nowUnix, errTokenFromFuture)
+	return a.validateTimeBound(c.iat, nowUnix, errTokenFromFuture)
 }
 
-// validateTimeBound checks that a JWT time claim (nbf or iat) is not
-// too far in the future, accounting for clock skew.
-func validateTimeBound(raw []byte, nowUnix int64, errVal error) error {
+// decodeNumericTime accepts either a JSON integer or fractional number.
+func decodeNumericTime(raw []byte) (int64, bool) {
+	if v, ok := jsonfast.DecodeInt64(raw); ok {
+		return v, true
+	}
+	if f, ok := jsonfast.DecodeFloat64(raw); ok {
+		return int64(f), true
+	}
+	return 0, false
+}
+
+func (a *oauthAuthenticator) validateTimeBound(raw []byte, nowUnix int64, errVal error) error {
+	return validateTimeBound(raw, nowUnix, a.skewSec, errVal)
+}
+
+// validateTimeBound rejects time claims that are present but malformed
+// or further in the future than skewSec allows.
+func validateTimeBound(raw []byte, nowUnix, skewSec int64, errVal error) error {
 	if len(raw) == 0 {
 		return nil
 	}
-	ts, ok := parseJSONNumber(raw)
-	if ok && nowUnix < ts-jwtClockSkewSec {
+	ts, ok := decodeNumericTime(raw)
+	if !ok {
+		return errMalformedTimeClaim
+	}
+	if nowUnix < ts-skewSec {
 		return errVal
 	}
 	return nil
 }
 
-// claimStringView returns a zero-allocation string view of a raw JSON string value.
-// WARNING: the returned string is backed by the pooled decode buffer and must not
-// outlive it — copy the value before returning the buffer to the pool.
+// claimStringView returns a zero-allocation string view aliasing the
+// pooled decode buffer. Use only for fields that need not be JSON
+// unescaped; callers retaining the value MUST detach via decodeAndDetach.
 //
-//nolint:gosec // unsafe.String intentional: zero-alloc view into heap-allocated combined buffer
+//nolint:gosec // zero-alloc view into pooled buffer; detached by callers.
 func claimStringView(raw []byte) string {
 	if len(raw) < 3 || raw[0] != '"' || raw[len(raw)-1] != '"' {
 		return ""
 	}
-
 	return unsafe.String(&raw[1], len(raw)-2)
 }
 
-// subjectFromClaims extracts the subject identifier from pre-extracted claims.
-// Tries "sub", then "client_id", then "azp".
+// decodeAndDetach returns a JSON-unescaped, detached copy of s when
+// escapes are present; otherwise a plain clone of the view.
+func decodeAndDetach(s string) string {
+	if s == "" {
+		return ""
+	}
+	if strings.IndexByte(s, '\\') < 0 {
+		return strings.Clone(s)
+	}
+	if dec, ok := jsonfast.DecodeString([]byte(`"` + s + `"`)); ok {
+		return dec
+	}
+	return strings.Clone(s)
+}
+
+// subjectFromClaims tries "sub", then "client_id", then "azp".
 func subjectFromClaims(c *jwtClaims) string {
 	if s := claimStringView(c.sub); s != "" {
 		return s
 	}
-
 	if s := claimStringView(c.clientID); s != "" {
 		return s
 	}
-
 	return claimStringView(c.azp)
 }
 
-// scopesFromClaims extracts scopes from pre-extracted claims.
-// Handles "scope" (space-separated string) and "scp" (string or array).
-func scopesFromClaims(c *jwtClaims) string {
-	if s := claimStringView(c.scope); s != "" {
-		return s
+// detachScopes resolves the scope set from "scope" (string),
+// "scp" (string) or "scp" (array), returning detached storage.
+func detachScopes(c *jwtClaims) []string {
+	if len(c.scope) >= 2 && c.scope[0] == '"' {
+		return decodeScopeString(c.scope)
 	}
-	if s := claimStringView(c.scp); s != "" {
-		return s
+	if len(c.scp) >= 2 && c.scp[0] == '"' {
+		return decodeScopeString(c.scp)
 	}
 	return scopesFromSCPArray(c.scp)
 }
 
-// scopesFromSCPArray parses the scp claim when it is a JSON array of strings.
-func scopesFromSCPArray(raw []byte) string {
-	if len(raw) < 2 || raw[0] != '[' {
-		return ""
+// decodeScopeString unquotes a JSON string and splits it on spaces.
+// The owned string serves as the single backing allocation for every
+// returned substring. Fast path: when no JSON escapes are present we
+// skip jsonfast.DecodeString entirely.
+func decodeScopeString(raw []byte) []string {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return nil
 	}
-	var b strings.Builder
+	inner := raw[1 : len(raw)-1]
+	if bytes.IndexByte(inner, '\\') < 0 {
+		if len(inner) == 0 {
+			return nil
+		}
+		return splitScopesShared(string(inner))
+	}
+	decoded, ok := jsonfast.DecodeString(raw)
+	if !ok || decoded == "" {
+		return nil
+	}
+	return splitScopesShared(decoded)
+}
+
+// splitScopesShared splits s on spaces; returned substrings share s.
+// One allocation: the slice header.
+func splitScopesShared(s string) []string {
+	if s == "" {
+		return nil
+	}
+	count := 1
+	for i := range len(s) {
+		if s[i] == ' ' {
+			count++
+		}
+	}
+	out := make([]string, 0, count)
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ' ' {
+			if i > start {
+				out = append(out, s[start:i])
+			}
+			start = i + 1
+		}
+	}
+	return out
+}
+
+func scopesFromSCPArray(raw []byte) []string {
+	if len(raw) < 2 || raw[0] != '[' {
+		return nil
+	}
+	var scopes []string
 	jsonfast.IterateStringArray(raw, func(val string) bool {
-		v := strings.TrimSpace(val)
-		if v == "" {
-			return true
+		if v := strings.TrimSpace(val); v != "" {
+			scopes = append(scopes, v)
 		}
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(v)
 		return true
 	})
-	return b.String()
+	return scopes
 }
 
-// copyClaims copies subject and scopes into a single owned allocation,
-// detaching them from the pooled buffer.
-func copyClaims(sub, scp string) (subOut, scpOut string) {
-	sLen := len(sub)
-	total := sLen + len(scp)
-	if total == 0 {
-		return "", ""
+// decodeClaimValue maps a raw JSON value to a Go value: string, int64,
+// float64, bool, nil, or the raw JSON text for objects/arrays.
+func decodeClaimValue(raw []byte) any {
+	if len(raw) == 0 {
+		return nil
 	}
-	buf := make([]byte, total)
-	copy(buf, sub)
-	copy(buf[sLen:], scp)
-	all := string(buf)
-	return all[:sLen], all[sLen:]
-}
-
-// apiKeyToken extracts the token from an "ApiKey <token>" Authorization header.
-func apiKeyToken(header string) (string, bool) {
-	if len(header) <= 7 || header[6] != ' ' {
-		return "", false
+	switch raw[0] {
+	case '"':
+		s, ok := jsonfast.DecodeString(raw)
+		if !ok {
+			return string(raw)
+		}
+		return s
+	case 't', 'f':
+		v, ok := jsonfast.DecodeBool(raw)
+		if !ok {
+			return string(raw)
+		}
+		return v
+	case 'n':
+		return nil
 	}
-	if header[0]|0x20 != 'a' || header[1]|0x20 != 'p' || header[2]|0x20 != 'i' ||
-		header[3]|0x20 != 'k' || header[4]|0x20 != 'e' || header[5]|0x20 != 'y' {
-		return "", false
+	if n, ok := jsonfast.DecodeInt64(raw); ok {
+		return n
 	}
-	return header[7:], true
+	if f, ok := jsonfast.DecodeFloat64(raw); ok {
+		return f
+	}
+	return string(raw)
 }
 
 func (a *oauthAuthenticator) verifySignature(
@@ -531,48 +735,38 @@ func (a *oauthAuthenticator) verifySignature(
 	if len(a.hmacSecret) > 0 {
 		return a.verifyHMACSignature(alg, signingInput, signature, sumBuf)
 	}
-
 	return a.verifyJWKS(ctx, alg, kid, signingInput, signature, sumBuf)
 }
 
-// verifyHMACSignature verifies a JWT with a pooled HMAC instance.
-// sumBuf provides pre-allocated space for the digest.
 func (a *oauthAuthenticator) verifyHMACSignature(alg string, signingInput, signature, sumBuf []byte) error {
 	var idx int
-
 	switch alg {
-	case "HS256":
+	case algHS256:
 		idx = 0
-	case "HS384":
+	case algHS384:
 		idx = 1
-	case "HS512":
+	case algHS512:
 		idx = 2
 	default:
 		return errUnsupportedAlgAuth
 	}
 
 	pool := &a.hmacPools[idx]
-
 	mac, ok := pool.Get().(hash.Hash)
 	if !ok {
 		return errInternalAuth
 	}
-
 	mac.Reset()
-
 	if _, err := mac.Write(signingInput); err != nil {
 		pool.Put(mac)
-
 		return errInternalAuth
 	}
-
 	sum := mac.Sum(sumBuf[:0])
 	pool.Put(mac)
 
 	if !hmac.Equal(signature, sum) {
 		return errSignatureVerifyFailed
 	}
-
 	return nil
 }
 
@@ -583,50 +777,59 @@ func (a *oauthAuthenticator) verifyJWKS(
 	if err != nil {
 		return errNoKeyAuth
 	}
-
 	hashAlg, digest, err := hashJWT(alg, signingInput, hashBuf)
 	if err != nil {
 		return errUnsupportedAlgAuth
 	}
-
 	switch publicKey := key.(type) {
 	case *rsa.PublicKey:
 		if err := verifyRSASignature(alg, publicKey, hashAlg, digest, signature); err != nil {
 			return errSignatureVerifyFailed
 		}
-
 		return nil
 	case *ecdsa.PublicKey:
+		if !ecdsaCurveMatchesAlg(publicKey.Curve, alg) {
+			return errSignatureVerifyFailed
+		}
 		if !ecdsa.VerifyASN1(publicKey, digest, signature) {
 			return errSignatureVerifyFailed
 		}
-
 		return nil
 	default:
 		return errUnsupportedKeyAuth
 	}
 }
 
-func hashJWT(alg string, signingInput, buf []byte) (crypto.Hash, []byte, error) {
-	var hashAlg crypto.Hash
+// ecdsaCurveMatchesAlg pins each ES* algorithm to its mandated curve.
+func ecdsaCurveMatchesAlg(curve elliptic.Curve, alg string) bool {
 	switch alg {
-	case "RS256", "PS256", "ES256":
-		hashAlg = crypto.SHA256
-	case "RS384", "PS384", "ES384":
-		hashAlg = crypto.SHA384
-	case "RS512", "PS512", "ES512":
-		hashAlg = crypto.SHA512
-	default:
-		return 0, nil, fmt.Errorf("%w: %q", errUnsupportedJWTAlg, alg)
+	case algES256:
+		return curve == elliptic.P256()
+	case algES384:
+		return curve == elliptic.P384()
+	case algES512:
+		return curve == elliptic.P521()
 	}
-	var pool *sync.Pool
-	switch hashAlg {
-	case crypto.SHA256:
-		pool = &jwtSHA256Pool
-	case crypto.SHA384:
-		pool = &jwtSHA384Pool
-	default: // crypto.SHA512
-		pool = &jwtSHA512Pool
+	return false
+}
+
+// jwtHashPool returns the hash function and pooled hasher for alg.
+func jwtHashPool(alg string) (crypto.Hash, *sync.Pool) {
+	switch alg {
+	case algRS256, algPS256, algES256:
+		return crypto.SHA256, &jwtSHA256Pool
+	case algRS384, algPS384, algES384:
+		return crypto.SHA384, &jwtSHA384Pool
+	case algRS512, algPS512, algES512:
+		return crypto.SHA512, &jwtSHA512Pool
+	}
+	return 0, nil
+}
+
+func hashJWT(alg string, signingInput, buf []byte) (crypto.Hash, []byte, error) {
+	hashAlg, pool := jwtHashPool(alg)
+	if pool == nil {
+		return 0, nil, fmt.Errorf("%w: %q", errUnsupportedJWTAlg, alg)
 	}
 	h, ok := pool.Get().(hash.Hash)
 	if !ok {
@@ -667,11 +870,20 @@ func (a *oauthAuthenticator) lookupKey(ctx context.Context, kid, alg string) (an
 	return nil, errNoVerificationKey
 }
 
+// findKey resolves the verification key. With kid set, only the keyed
+// entry is considered: falling back to other keys would let an attacker
+// pin a kid the IdP no longer publishes while signing with the current
+// key. With kid empty, the first matching alg wins.
 func findKey(keys map[string]jwkPublicKey, kid, alg string) (any, bool) {
 	if kid != "" {
-		if key, ok := keys[kid]; ok && (key.alg == "" || key.alg == alg) {
-			return key.key, true
+		key, ok := keys[kid]
+		if !ok {
+			return nil, false
 		}
+		if key.alg != "" && key.alg != alg {
+			return nil, false
+		}
+		return key.key, true
 	}
 	for _, key := range keys {
 		if key.alg == "" || key.alg == alg {
@@ -681,56 +893,130 @@ func findKey(keys map[string]jwkPublicKey, kid, alg string) (any, bool) {
 	return nil, false
 }
 
-func (a *oauthAuthenticator) currentKeys(ctx context.Context) (map[string]jwkPublicKey, error) {
-	a.mu.RLock()
-	keys := a.keys
-	expiry := a.keysExpiry
-	a.mu.RUnlock()
-	if len(keys) == 0 || time.Now().After(expiry) {
-		return a.refreshKeys(ctx)
-	}
-	return keys, nil
+// seedKeysForTest pre-populates the JWKS cache. Test-only seam.
+func (a *oauthAuthenticator) seedKeysForTest(keys map[string]jwkPublicKey) {
+	a.keys.Store(&keysSnapshot{keys: keys, expiry: time.Now().Add(5 * time.Minute)})
 }
 
-func (a *oauthAuthenticator) refreshKeys(ctx context.Context) (_ map[string]jwkPublicKey, err error) {
-	a.refreshMu.Lock()
-	defer a.refreshMu.Unlock()
-
-	a.mu.RLock()
-	if len(a.keys) > 0 && time.Now().Before(a.keysExpiry) {
-		keys := a.keys
-		a.mu.RUnlock()
-		return keys, nil
+func (a *oauthAuthenticator) currentKeys(ctx context.Context) (map[string]jwkPublicKey, error) {
+	if snap := a.keys.Load(); snap != nil && time.Now().Before(snap.expiry) {
+		return snap.keys, nil
 	}
-	a.mu.RUnlock()
+	return a.refreshKeys(ctx)
+}
 
-	if a.jwksURL == "" {
-		oidc, oidcErr := discoverOIDC(ctx, a.httpClient, a.issuer)
-		if oidcErr != nil {
-			return nil, fmt.Errorf("OIDC discovery: %w", oidcErr)
+// refreshKeys performs a single-flight JWKS refresh. The fast path
+// returns the cached snapshot via atomic load; otherwise the caller
+// joins or starts an in-flight fetch and waits on its channel without
+// holding any mutex.
+func (a *oauthAuthenticator) refreshKeys(ctx context.Context) (map[string]jwkPublicKey, error) {
+	if snap := a.keys.Load(); snap != nil && time.Now().Before(snap.expiry) {
+		return snap.keys, nil
+	}
+	if backoff := a.failedUntilNanos.Load(); backoff > 0 && time.Now().UnixNano() < backoff {
+		if snap := a.keys.Load(); snap != nil {
+			return snap.keys, nil
 		}
-		a.jwksURL = oidc.JWKSURI
+		return nil, errJWKSEndpoint
 	}
 
-	keys, err := a.fetchAndParseJWKS(ctx)
+	call := a.beginKeysFetch()
+	select {
+	case <-call.done:
+		if call.err != nil {
+			return nil, call.err
+		}
+		return call.snap.keys, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (a *oauthAuthenticator) beginKeysFetch() *keysFetchCall {
+	if call := a.inflight.Load(); call != nil {
+		return call
+	}
+	a.refreshMu.Lock()
+	if call := a.inflight.Load(); call != nil {
+		a.refreshMu.Unlock()
+		return call
+	}
+	call := &keysFetchCall{done: make(chan struct{})}
+	a.inflight.Store(call)
+	a.refreshMu.Unlock()
+
+	go a.runKeysFetch(call)
+	return call
+}
+
+func (a *oauthAuthenticator) runKeysFetch(call *keysFetchCall) {
+	ctx, cancel := context.WithTimeout(context.Background(), a.httpClientTimeout())
+	defer cancel()
+
+	snap, err := a.fetchKeysSnapshot(ctx)
+	if err == nil {
+		a.keys.Store(snap)
+		a.failedUntilNanos.Store(0)
+		call.snap = snap
+	} else {
+		a.failedUntilNanos.Store(time.Now().Add(jwksNegativeCacheTTL).UnixNano())
+		call.err = err
+	}
+	a.refreshMu.Lock()
+	a.inflight.Store(nil)
+	a.refreshMu.Unlock()
+	close(call.done)
+}
+
+func (a *oauthAuthenticator) httpClientTimeout() time.Duration {
+	if a.httpClient != nil && a.httpClient.Timeout > 0 {
+		return a.httpClient.Timeout
+	}
+	return 5 * time.Second
+}
+
+func (a *oauthAuthenticator) fetchKeysSnapshot(ctx context.Context) (*keysSnapshot, error) {
+	jwksURL, err := a.resolveJWKSURL(ctx)
 	if err != nil {
 		return nil, err
 	}
-	a.mu.Lock()
-	a.keys = keys
-	a.keysExpiry = time.Now().Add(jwksCacheTTL)
-	a.mu.Unlock()
-	return keys, nil
+	keys, err := a.fetchAndParseJWKS(ctx, jwksURL)
+	if err != nil {
+		return nil, err
+	}
+	return &keysSnapshot{keys: keys, expiry: time.Now().Add(a.cacheTTL)}, nil
 }
 
-// fetchAndParseJWKS fetches the JWKS endpoint and parses the key set.
-func (a *oauthAuthenticator) fetchAndParseJWKS(ctx context.Context) (_ map[string]jwkPublicKey, err error) {
-	//nolint:gosec // G107: a.jwksURL is operator-configured, never derived from request input
-	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, a.jwksURL, http.NoBody)
+func (a *oauthAuthenticator) resolveJWKSURL(ctx context.Context) (string, error) {
+	if p := a.jwksURLAtomic.Load(); p != nil && *p != "" {
+		return *p, nil
+	}
+	oidc, err := discoverOIDC(ctx, a.httpClient, a.issuer)
+	if err != nil {
+		return "", fmt.Errorf("OIDC discovery: %w", err)
+	}
+	jwksURL := oidc.JWKSURI
+	a.jwksURLAtomic.Store(&jwksURL)
+	return jwksURL, nil
+}
+
+// fetchAndParseJWKS fetches the JWKS endpoint over https and parses
+// the document. Plaintext delivery of public keys is refused.
+func (a *oauthAuthenticator) fetchAndParseJWKS(
+	ctx context.Context, jwksURL string,
+) (keys map[string]jwkPublicKey, err error) {
+	if schemeErr := requireHTTPS(jwksURL); schemeErr != nil {
+		return nil, fmt.Errorf("JWKS endpoint: %w", schemeErr)
+	}
+
+	//nolint:gosec // G704: jwksURL gated by requireHTTPS above.
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, http.NoBody)
 	if reqErr != nil {
 		return nil, reqErr
 	}
-	resp, err := a.httpClient.Do(req) //nolint:gosec // G704: operator-configured jwksURL, not user input
+
+	//nolint:gosec // G704: request URL is operator-configured and HTTPS-gated.
+	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -742,63 +1028,127 @@ func (a *oauthAuthenticator) fetchAndParseJWKS(ctx context.Context) (_ map[strin
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: status %d", errJWKSEndpoint, resp.StatusCode)
 	}
-	var set jwkSet
-	if decodeErr := json.NewDecoder(resp.Body).Decode(&set); decodeErr != nil {
-		return nil, decodeErr
+	body, readErr := readAllLimited(resp.Body, jwksMaxBodyBytes)
+	if readErr != nil {
+		return nil, readErr
 	}
-	return parseJWKS(set)
+	return parseJWKSBytes(body)
 }
 
-func parseJWKS(set jwkSet) (map[string]jwkPublicKey, error) {
-	keys := make(map[string]jwkPublicKey, len(set.Keys))
-	for idx := range set.Keys {
-		item := &set.Keys[idx]
-		key, err := parseJWK(item)
+func parseJWKSBytes(data []byte) (map[string]jwkPublicKey, error) {
+	keysRaw, ok := jsonfast.FindField(data, "keys")
+	if !ok {
+		return nil, errJWKSPayloadInvalid
+	}
+	keys := make(map[string]jwkPublicKey, 4)
+	idx := 0
+	var iterErr error
+	jsonfast.IterateArray(keysRaw, func(elem []byte) bool {
+		key, name, alg, err := parseJWKObject(elem, idx)
 		if err != nil {
-			return nil, err
+			iterErr = err
+			return false
 		}
-		name := item.Kid
-		if name == "" {
-			name = fmt.Sprintf("key-%d", idx)
-		}
-		keys[name] = jwkPublicKey{key: key, alg: item.Alg}
+		keys[name] = jwkPublicKey{key: key, alg: alg}
+		idx++
+		return true
+	})
+	if iterErr != nil {
+		return nil, iterErr
 	}
 	return keys, nil
 }
 
-func parseJWK(item *jwk) (any, error) {
-	switch item.Kty {
-	case "RSA":
-		return parseRSAKey(item)
-	case "EC":
-		return parseECKey(item)
-	default:
-		return nil, fmt.Errorf("%w: %q", errUnsupportedKeyType, item.Kty)
+type jwkRaw struct {
+	kty, kid, alg, crv, n, e, x, y string
+}
+
+func parseJWKObject(data []byte, idx int) (key any, name, alg string, err error) {
+	r := decodeJWKFields(data)
+	key, err = jwkToKey(&r)
+	if err != nil {
+		return nil, "", "", err
+	}
+	kid := r.kid
+	if kid == "" {
+		kid = "key-" + strconv.Itoa(idx)
+	}
+	return key, kid, r.alg, nil
+}
+
+func decodeJWKFields(data []byte) jwkRaw {
+	var r jwkRaw
+	jsonfast.IterateFields(data, func(rawKey, value []byte) bool {
+		decoded, _ := jsonfast.DecodeString(value)
+		assignJWKField(&r, string(rawKey), decoded)
+		return true
+	})
+	return r
+}
+
+func assignJWKField(r *jwkRaw, field, value string) {
+	switch field {
+	case `"kty"`:
+		r.kty = value
+	case `"kid"`:
+		r.kid = value
+	case `"alg"`:
+		r.alg = value
+	case `"crv"`:
+		r.crv = value
+	case `"n"`:
+		r.n = value
+	case `"e"`:
+		r.e = value
+	case `"x"`:
+		r.x = value
+	case `"y"`:
+		r.y = value
 	}
 }
 
-func parseRSAKey(item *jwk) (*rsa.PublicKey, error) {
-	n, err := decodeBase64Int(item.N)
-	if err != nil {
-		return nil, err
+func jwkToKey(r *jwkRaw) (any, error) {
+	switch r.kty {
+	case jwkTypeRSA:
+		return parseRSAKey(r.n, r.e)
+	case jwkTypeEC:
+		return parseECKey(r.crv, r.x, r.y)
 	}
-	e, err := decodeBase64Int(item.E)
-	if err != nil {
-		return nil, err
-	}
-	return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
+	return nil, fmt.Errorf("%w: %q", errUnsupportedKeyType, r.kty)
 }
 
-func parseECKey(item *jwk) (*ecdsa.PublicKey, error) {
-	curve, err := ellipticCurve(item.Crv)
+func parseRSAKey(nVal, eVal string) (*rsa.PublicKey, error) {
+	n, err := decodeBase64Int(nVal)
 	if err != nil {
 		return nil, err
 	}
-	x, err := decodeBase64Int(item.X)
+	e, err := decodeBase64Int(eVal)
 	if err != nil {
 		return nil, err
 	}
-	y, err := decodeBase64Int(item.Y)
+	exp := e.Int64()
+	if exp < minRSAExponent {
+		return nil, errRSAExponentWeak
+	}
+	if n.BitLen() < minRSAModulusBits {
+		return nil, errRSAModulusWeak
+	}
+	if n.BitLen() > rsaMaxModulusBits {
+		return nil, errRSAModulusTooLarge
+	}
+	return &rsa.PublicKey{N: n, E: int(exp)}, nil
+}
+
+func parseECKey(crv, xVal, yVal string) (*ecdsa.PublicKey, error) {
+	curve, err := ellipticCurve(crv)
+	if err != nil {
+		return nil, err
+	}
+	x, err := decodeBase64Int(xVal)
+	if err != nil {
+		return nil, err
+	}
+	y, err := decodeBase64Int(yVal)
 	if err != nil {
 		return nil, err
 	}
@@ -807,15 +1157,14 @@ func parseECKey(item *jwk) (*ecdsa.PublicKey, error) {
 
 func ellipticCurve(crv string) (elliptic.Curve, error) {
 	switch crv {
-	case "P-256":
+	case jwkCrvP256:
 		return elliptic.P256(), nil
-	case "P-384":
+	case jwkCrvP384:
 		return elliptic.P384(), nil
-	case "P-521":
+	case jwkCrvP521:
 		return elliptic.P521(), nil
-	default:
-		return nil, fmt.Errorf("%w: %q", errUnsupportedCurve, crv)
 	}
+	return nil, fmt.Errorf("%w: %q", errUnsupportedCurve, crv)
 }
 
 func decodeBase64Int(value string) (*big.Int, error) {
@@ -826,83 +1175,87 @@ func decodeBase64Int(value string) (*big.Int, error) {
 	return new(big.Int).SetBytes(decoded), nil
 }
 
-// parseJWTHeaderDirect base64url-decodes the JWT header and extracts alg/kid
-// via direct byte scan, avoiding json.Unmarshal.
-func parseJWTHeaderDirect(encoded []byte) (jwtHeader, error) {
-	n := base64.RawURLEncoding.DecodedLen(len(encoded))
-	if n > 128 {
-		return parseJWTHeaderSlow(encoded)
+// parseJWTHeader base64url-decodes the JOSE header and lifts alg / kid /
+// typ / crit. Headers up to 128 bytes after decoding stay on the stack.
+func parseJWTHeader(encoded []byte) (jwtHeader, error) {
+	decLen := base64.RawURLEncoding.DecodedLen(len(encoded))
+	if decLen <= 128 {
+		var buf [128]byte
+		n, err := base64.RawURLEncoding.Decode(buf[:], encoded)
+		if err != nil {
+			return jwtHeader{}, err
+		}
+		return parseHeaderJSON(buf[:n])
 	}
-	var buf [128]byte
-	n, err := base64.RawURLEncoding.Decode(buf[:], encoded)
-	if err != nil {
-		return jwtHeader{}, err
-	}
-	raw := buf[:n]
-	h := jwtHeader{
-		Alg: algFromBytes(raw, jwtKeyAlg),
-		Kid: jsonStringValue(raw, jwtKeyKid),
-	}
-	if h.Alg != "" {
-		return h, nil
-	}
-	return parseJWTHeaderSlow(encoded)
-}
-
-// parseJWTHeaderSlow is the json.Unmarshal fallback for non-standard JWT headers.
-func parseJWTHeaderSlow(encoded []byte) (jwtHeader, error) {
-	dst := make([]byte, base64.RawURLEncoding.DecodedLen(len(encoded)))
+	dst := make([]byte, decLen)
 	n, err := base64.RawURLEncoding.Decode(dst, encoded)
 	if err != nil {
 		return jwtHeader{}, err
 	}
+	return parseHeaderJSON(dst[:n])
+}
+
+func parseHeaderJSON(data []byte) (jwtHeader, error) {
 	var h jwtHeader
-	if err := json.Unmarshal(dst[:n], &h); err != nil {
-		return jwtHeader{}, err
+	if raw, ok := jsonfast.FindField(data, "alg"); ok {
+		h.Alg = decodeAlg(raw)
+	}
+	if raw, ok := jsonfast.FindField(data, "kid"); ok {
+		h.Kid, _ = jsonfast.DecodeString(raw)
+	}
+	if raw, ok := jsonfast.FindField(data, "typ"); ok {
+		h.Typ = decodeTyp(raw)
+	}
+	if raw, ok := jsonfast.FindField(data, "crit"); ok {
+		h.Crit = critIsNonEmpty(raw)
+	}
+	if h.Alg == "" {
+		return jwtHeader{}, errInvalidJWTHeader
 	}
 	return h, nil
 }
 
-// algFromBytes extracts the algorithm field from raw JSON header bytes.
-// Returns a constant string for known JWS algorithms (zero-alloc).
-func algFromBytes(data, key []byte) string {
-	i := bytes.Index(data, key)
-	if i < 0 {
-		return ""
+// critIsNonEmpty reports whether raw is a JSON array with at least one
+// element; any non-empty crit is rejected because no JOSE header
+// extensions are understood.
+func critIsNonEmpty(raw []byte) bool {
+	if len(raw) < 2 || raw[0] != '[' {
+		return false
 	}
-	start := i + len(key)
-	if start >= len(data) {
-		return ""
-	}
-	end := bytes.IndexByte(data[start:], '"')
-	if end < 0 {
-		return ""
-	}
-	val := data[start : start+end]
-	if len(val) == 5 {
-		if s := matchKnownAlg(val); s != "" {
-			return s
+	for i := 1; i < len(raw)-1; i++ {
+		c := raw[i]
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			return c != ']'
 		}
 	}
-	return string(val)
+	return false
+}
+
+// decodeAlg returns one of the twelve interned algorithm constants when
+// raw is a quoted standard JWS alg, falling back to a generic decode.
+func decodeAlg(raw []byte) string {
+	if len(raw) == 7 && raw[0] == '"' && raw[6] == '"' {
+		if known := matchKnownAlg(raw[1:6]); known != "" {
+			return known
+		}
+	}
+	s, _ := jsonfast.DecodeString(raw)
+	return s
 }
 
 func matchKnownAlg(v []byte) string {
-	// BCE hint: proves v[0..4] are in-bounds, eliminating all per-case checks.
-	// The caller (algFromBytes) guarantees len(v) == 5.
 	_ = v[4]
 	switch {
 	case v[0] == 'H' && v[1] == 'S':
-		return matchAlgVariant(v[4], "HS256", "HS384", "HS512")
+		return matchAlgVariant(v[4], algHS256, algHS384, algHS512)
 	case v[0] == 'R' && v[1] == 'S':
-		return matchAlgVariant(v[4], "RS256", "RS384", "RS512")
+		return matchAlgVariant(v[4], algRS256, algRS384, algRS512)
 	case v[0] == 'E' && v[1] == 'S':
-		return matchAlgVariant(v[4], "ES256", "ES384", "ES512")
+		return matchAlgVariant(v[4], algES256, algES384, algES512)
 	case v[0] == 'P' && v[1] == 'S':
-		return matchAlgVariant(v[4], "PS256", "PS384", "PS512")
-	default:
-		return ""
+		return matchAlgVariant(v[4], algPS256, algPS384, algPS512)
 	}
+	return ""
 }
 
 func matchAlgVariant(last byte, s256, s384, s512 string) string {
@@ -913,65 +1266,68 @@ func matchAlgVariant(last byte, s256, s384, s512 string) string {
 		return s384
 	case '2':
 		return s512
-	default:
-		return ""
 	}
+	return ""
 }
 
-// jsonStringValue extracts a simple "key":"value" pair from flat JSON.
-// Returns "" if not found or the value contains escape sequences.
-func jsonStringValue(data, key []byte) string {
-	i := bytes.Index(data, key)
-	if i < 0 {
-		return ""
+// decodeTyp interns the four standard typ values; any other value is
+// decoded normally.
+func decodeTyp(raw []byte) string {
+	if known := internKnownTyp(raw); known != "" {
+		return known
 	}
-	start := i + len(key)
-	if start >= len(data) {
-		return ""
-	}
-	end := bytes.IndexByte(data[start:], '"')
-	if end < 0 {
-		return ""
-	}
-	val := data[start : start+end]
-	if bytes.IndexByte(val, '\\') >= 0 {
-		return ""
-	}
-	return string(val)
+	s, _ := jsonfast.DecodeString(raw)
+	return s
 }
 
-// parseJSONNumber parses a raw JSON number into int64.
-// Zero-alloc for pure integer values (the common case for JWT timestamps).
-func parseJSONNumber(b []byte) (int64, bool) {
-	if len(b) == 0 {
-		return 0, false
+var knownTypes = [...]struct {
+	value  string
+	rawLen int
+}{
+	{value: typJWT, rawLen: 5},
+	{value: typAtJWT, rawLen: 8},
+	{value: typAppJWT, rawLen: 17},
+	{value: typAppAt, rawLen: 20},
+}
+
+func internKnownTyp(raw []byte) string {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return ""
 	}
-	var n int64
-	for _, c := range b {
-		if c < '0' || c > '9' {
-			//nolint:gosec // G103: b is a sub-slice of decoded payload, outlives this call.
-			s := unsafe.String(unsafe.SliceData(b), len(b))
-			f, err := strconv.ParseFloat(s, 64)
-			if err != nil {
-				return 0, false
-			}
-			return int64(f), true
+	body := raw[1 : len(raw)-1]
+	for _, kt := range knownTypes {
+		if len(raw) == kt.rawLen && asciiEqualFoldRaw(body, kt.value) {
+			return kt.value
 		}
-		n = n*10 + int64(c-'0')
 	}
-	return n, true
+	return ""
 }
 
-// equalQuotedBytes checks if a raw JSON quoted value equals the given
-// unquoted string, without allocation.
-// string(raw[1:len(raw)-1]) == s is compiled to a direct memcmp (no alloc).
+func asciiEqualFoldRaw(b []byte, lower string) bool {
+	if len(b) != len(lower) {
+		return false
+	}
+	for i := range b {
+		c := b[i]
+		if c >= 'A' && c <= 'Z' {
+			c |= 0x20
+		}
+		if c != lower[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// equalQuotedBytes compares a raw JSON quoted value against an unquoted
+// string without allocating. Comparison is not constant time.
 func equalQuotedBytes(raw []byte, s string) bool {
 	return len(raw) == len(s)+2 && raw[0] == '"' && raw[len(raw)-1] == '"' &&
 		string(raw[1:len(raw)-1]) == s
 }
 
-// containsAudienceRaw checks audience from raw JSON value.
-// Handles both string and array forms.
+// containsAudienceRaw checks audience against a quoted string or a
+// JSON array of strings.
 func containsAudienceRaw(raw []byte, expected string) bool {
 	if len(raw) < 2 {
 		return false
@@ -993,46 +1349,15 @@ func containsAudienceRaw(raw []byte, expected string) bool {
 	return false
 }
 
-func bearerToken(header string) (string, bool) {
-	if len(header) <= 7 || header[6] != ' ' {
-		return "", false
-	}
-	// ASCII case-fold per RFC 7235 §2.1.
-	if header[0]|0x20 != 'b' || header[1]|0x20 != 'e' || header[2]|0x20 != 'a' ||
-		header[3]|0x20 != 'r' || header[4]|0x20 != 'e' || header[5]|0x20 != 'r' {
-		return "", false
-	}
-	return header[7:], true
-}
-
-func hasRequiredScopes(have string, required []string) bool {
+// hasRequiredScopes reports whether every entry in required appears in have.
+func hasRequiredScopes(have, required []string) bool {
 	if len(required) == 0 {
 		return true
 	}
-	if have == "" {
-		return false
-	}
 	for _, req := range required {
-		if !containsScope(have, req) {
+		if !slices.Contains(have, req) {
 			return false
 		}
 	}
 	return true
-}
-
-// containsScope checks whether the space-separated scopes string contains scope.
-func containsScope(scopes, scope string) bool {
-	for scopes != "" {
-		if idx := strings.IndexByte(scopes, ' '); idx >= 0 {
-			if scopes[:idx] == scope {
-				return true
-			}
-
-			scopes = scopes[idx+1:]
-		} else {
-			return scopes == scope
-		}
-	}
-
-	return false
 }

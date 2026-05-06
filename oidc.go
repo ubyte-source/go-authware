@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -20,15 +19,22 @@ type oidcConfiguration struct {
 }
 
 // discoverOIDC fetches {issuer}/.well-known/openid-configuration and
-// returns the parsed jwks_uri and issuer.
-func discoverOIDC(ctx context.Context, client *http.Client, issuer string) (_ *oidcConfiguration, err error) {
+// returns the parsed jwks_uri and issuer. Both URLs must use https or
+// be a loopback host.
+func discoverOIDC(ctx context.Context, client *http.Client, issuer string) (cfg *oidcConfiguration, err error) {
+	if schemeErr := requireHTTPS(issuer); schemeErr != nil {
+		return nil, fmt.Errorf("OIDC discovery: %w", schemeErr)
+	}
 	endpoint := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
-	//nolint:gosec // G107: endpoint is derived from operator-configured issuer, never from request input
+
+	//nolint:gosec // G704: endpoint built from issuer, HTTPS-gated by requireHTTPS above.
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if reqErr != nil {
 		return nil, reqErr
 	}
-	resp, err := client.Do(req) //nolint:gosec // G704: operator-configured issuer URL, not user input
+
+	//nolint:gosec // G704: request URL is operator-configured and HTTPS-gated.
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -40,17 +46,24 @@ func discoverOIDC(ctx context.Context, client *http.Client, issuer string) (_ *o
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: status %d", errOIDCDiscoveryFailed, resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	body, err := readAllLimited(resp.Body, 256<<10)
 	if err != nil {
 		return nil, err
 	}
+	return parseOIDCDocument(body)
+}
+
+func parseOIDCDocument(body []byte) (*oidcConfiguration, error) {
 	jwksURI, ok := findStringField(body, "jwks_uri")
 	if !ok || jwksURI == "" {
 		return nil, errOIDCMissingJWKSURI
 	}
+	if err := requireHTTPS(jwksURI); err != nil {
+		return nil, fmt.Errorf("OIDC discovery jwks_uri: %w", err)
+	}
 	cfg := &oidcConfiguration{JWKSURI: jwksURI}
-	if issuer, found := findStringField(body, "issuer"); found {
-		cfg.Issuer = issuer
+	if iss, found := findStringField(body, "issuer"); found {
+		cfg.Issuer = iss
 	}
 	return cfg, nil
 }

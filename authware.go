@@ -1,123 +1,59 @@
 package authware
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
+)
+
+const (
+	defaultKeyHeaderName = "X-Api-Key"
+	defaultRealm         = "restricted"
 )
 
 var (
 	errBearerTokenRequired = errors.New("auth bearer mode requires a token")
 	errAPIKeyRequired      = errors.New("auth apikey mode requires a key")
+	errMTLSConfigRequired  = errors.New("auth mtls mode requires MTLSAllowedSubjects or MTLSAllowedSPKIPins")
+	errMTLSPinSize         = errors.New("auth mtls SPKI pin must be 32 bytes (SHA-256)")
 	errUnsupportedAuthMode = errors.New("unsupported auth mode")
 )
 
-// Supported authentication modes.
-const (
-	ModeNone   = "none"
-	ModeBearer = "bearer"
-	ModeAPIKey = "apikey"
-	ModeOAuth  = "oauth"
-
-	defaultKeyHeaderName = "X-API-Key"
-	defaultRealm         = "restricted"
-)
-
-// IdentityFromContext returns the authenticated identity from the request
-// context. Returns the zero value and false if the request was not authenticated.
-func IdentityFromContext(ctx context.Context) (Identity, bool) {
-	id, ok := ctx.Value(contextKey{}).(Identity)
-	return id, ok
-}
-
-// WithIdentity returns a copy of ctx carrying the given Identity.
-func WithIdentity(ctx context.Context, id Identity) context.Context {
-	return context.WithValue(ctx, contextKey{}, id)
-}
-
-// Middleware authenticates every request, storing the Identity in the
-// request context on success. The WWW-Authenticate challenge omits the
-// resource_metadata parameter (RFC 9728); callers needing it should
-// write a custom middleware around auth.Challenge.
-func Middleware(auth Authenticator) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id, err := auth.Authenticate(r)
-			if err != nil {
-				status, header, message := auth.Challenge(err, "")
-				if header != "" {
-					w.Header().Set("WWW-Authenticate", header)
-				}
-				http.Error(w, message, status)
-				return
-			}
-			next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), id)))
-		})
-	}
-}
-
-// RequireScopes returns an HTTP middleware that verifies the authenticated
-// identity (from context) possesses all the specified scopes.
-// Must be applied after Middleware.
-func RequireScopes(scopes ...string) func(http.Handler) http.Handler {
-	sorted := make([]string, len(scopes))
-	copy(sorted, scopes)
-	slices.Sort(sorted)
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id, ok := IdentityFromContext(r.Context())
-			if !ok {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			if !hasRequiredScopes(id.Scopes, sorted) {
-				http.Error(w, "missing required scope", http.StatusForbidden)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// New creates an Authenticator from the provided configuration.
+// New creates an [Authenticator] from the provided configuration.
+// client is consulted by [ModeOAuth] for JWKS fetching; nil installs a
+// default. New does not mutate the caller's Config: a shallow copy is
+// taken before normalisation.
 func New(cfg *Config, client *http.Client) (Authenticator, error) {
-	if cfg == nil {
-		cfg = &Config{}
+	var c Config
+	if cfg != nil {
+		c = *cfg
 	}
-	normalizeConfig(cfg)
-	if cfg.Mode == ModeOAuth {
-		return newOAuthAuthenticator(cfg, client)
-	}
-	return newStaticAuthenticator(cfg)
-}
-
-func newStaticAuthenticator(cfg *Config) (Authenticator, error) {
-	switch cfg.Mode {
+	normaliseConfig(&c)
+	switch c.Mode {
 	case ModeNone:
 		return allowAllAuthenticator{}, nil
 	case ModeBearer:
-		if cfg.BearerToken == "" {
+		if c.BearerToken == "" {
 			return nil, errBearerTokenRequired
 		}
-		return &bearerAuthenticator{
-			realm: cfg.Realm,
-			token: cfg.BearerToken,
-		}, nil
+		return &bearerAuthenticator{realm: c.Realm, token: c.BearerToken}, nil
 	case ModeAPIKey:
-		if cfg.APIKey == "" {
+		if c.APIKey == "" {
 			return nil, errAPIKeyRequired
 		}
-		return &apiKeyAuthenticator{realm: cfg.Realm, header: cfg.APIKeyHeader, value: cfg.APIKey}, nil
+		return &apiKeyAuthenticator{realm: c.Realm, header: c.APIKeyHeader, value: c.APIKey}, nil
+	case ModeOAuth:
+		return newOAuthAuthenticator(&c, client)
+	case ModeMTLS:
+		return newMTLSAuthenticator(&c)
 	default:
-		return nil, fmt.Errorf("%w: %q", errUnsupportedAuthMode, cfg.Mode)
+		return nil, fmt.Errorf("%w: %q", errUnsupportedAuthMode, c.Mode)
 	}
 }
 
-func normalizeConfig(cfg *Config) {
-	cfg.Mode = strings.ToLower(strings.TrimSpace(inferMode(cfg)))
+func normaliseConfig(cfg *Config) {
+	cfg.Mode = normaliseMode(inferMode(cfg))
 	cfg.Realm = strings.TrimSpace(cfg.Realm)
 	if cfg.Realm == "" {
 		cfg.Realm = defaultRealm
@@ -130,15 +66,37 @@ func normalizeConfig(cfg *Config) {
 	cfg.OAuthIssuer = strings.TrimRight(cfg.OAuthIssuer, "/")
 	cfg.OAuthRequiredScopes = cleanValues(cfg.OAuthRequiredScopes)
 	cfg.OAuthAuthorizationServers = cleanValues(cfg.OAuthAuthorizationServers)
+	cfg.MTLSAllowedSubjects = cleanValues(cfg.MTLSAllowedSubjects)
 }
 
-func inferMode(cfg *Config) string {
-	if strings.TrimSpace(cfg.Mode) != "" {
-		return cfg.Mode
+// normaliseMode lowercases m without allocating when the string is
+// already the canonical form of one of the supported modes.
+func normaliseMode(m Mode) Mode {
+	trimmed := strings.TrimSpace(string(m))
+	switch trimmed {
+	case "", string(ModeNone):
+		return ModeNone
+	case string(ModeBearer):
+		return ModeBearer
+	case string(ModeAPIKey):
+		return ModeAPIKey
+	case string(ModeOAuth):
+		return ModeOAuth
+	case string(ModeMTLS):
+		return ModeMTLS
+	}
+	return Mode(strings.ToLower(trimmed))
+}
+
+func inferMode(cfg *Config) Mode {
+	if m := Mode(strings.TrimSpace(string(cfg.Mode))); m != "" {
+		return m
 	}
 	switch {
 	case cfg.OAuthIssuer != "" || cfg.OAuthJWKSURL != "" || cfg.OAuthHMACSecret != "":
 		return ModeOAuth
+	case len(cfg.MTLSAllowedSubjects) > 0 || len(cfg.MTLSAllowedSPKIPins) > 0:
+		return ModeMTLS
 	case cfg.APIKey != "":
 		return ModeAPIKey
 	case cfg.BearerToken != "":
@@ -148,6 +106,9 @@ func inferMode(cfg *Config) string {
 	}
 }
 
+// cleanValues trims, drops empty, and de-duplicates values while
+// preserving input order. Order matters for OAuthAuthorizationServers
+// (probed in order).
 func cleanValues(values []string) []string {
 	if len(values) == 0 {
 		return nil
@@ -165,6 +126,5 @@ func cleanValues(values []string) []string {
 		seen[value] = struct{}{}
 		cleaned = append(cleaned, value)
 	}
-	slices.Sort(cleaned)
 	return cleaned
 }

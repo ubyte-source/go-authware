@@ -15,8 +15,8 @@ func TestDiscoverOIDC_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if encErr := json.NewEncoder(w).Encode(map[string]any{
-			"issuer":   "https://issuer.example.com",
-			"jwks_uri": "https://issuer.example.com/jwks",
+			testIssuerField: testIssuerURL,
+			"jwks_uri":      testJWKSURL,
 		}); encErr != nil {
 			t.Errorf("encode: %v", encErr)
 		}
@@ -27,10 +27,10 @@ func TestDiscoverOIDC_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discoverOIDC: %v", err)
 	}
-	if cfg.JWKSURI != "https://issuer.example.com/jwks" {
+	if cfg.JWKSURI != testJWKSURL {
 		t.Fatalf("JWKSURI = %q", cfg.JWKSURI)
 	}
-	if cfg.Issuer != "https://issuer.example.com" {
+	if cfg.Issuer != testIssuerURL {
 		t.Fatalf("Issuer = %q", cfg.Issuer)
 	}
 }
@@ -64,7 +64,7 @@ func TestDiscoverOIDC_MissingJWKSURI(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if encErr := json.NewEncoder(w).Encode(map[string]any{
-			"issuer": "https://issuer.example.com",
+			testIssuerField: testIssuerURL,
 		}); encErr != nil {
 			t.Errorf("encode: %v", encErr)
 		}
@@ -97,8 +97,8 @@ func TestDiscoverOIDC_TrailingSlash(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if encErr := json.NewEncoder(w).Encode(map[string]any{
-			"issuer":   "https://issuer.example.com",
-			"jwks_uri": "https://issuer.example.com/jwks",
+			testIssuerField: testIssuerURL,
+			"jwks_uri":      testJWKSURL,
 		}); encErr != nil {
 			t.Errorf("encode: %v", encErr)
 		}
@@ -109,7 +109,7 @@ func TestDiscoverOIDC_TrailingSlash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discoverOIDC with trailing slash: %v", err)
 	}
-	if cfg.JWKSURI != "https://issuer.example.com/jwks" {
+	if cfg.JWKSURI != testJWKSURL {
 		t.Fatalf("JWKSURI = %q", cfg.JWKSURI)
 	}
 }
@@ -131,14 +131,14 @@ func (t *closeErrOIDCTransport) RoundTrip(_ *http.Request) (*http.Response, erro
 
 func TestDiscoverOIDC_CloseError(t *testing.T) {
 	validJSON, mErr := json.Marshal(map[string]any{
-		"issuer":   "https://issuer.example.com",
-		"jwks_uri": "https://issuer.example.com/jwks",
+		testIssuerField: testIssuerURL,
+		"jwks_uri":      testJWKSURL,
 	})
 	if mErr != nil {
 		t.Fatalf("marshal: %v", mErr)
 	}
 	client := &http.Client{Transport: &closeErrOIDCTransport{body: string(validJSON)}}
-	_, err := discoverOIDC(context.Background(), client, "https://issuer.example.com")
+	_, err := discoverOIDC(context.Background(), client, testIssuerURL)
 	if err == nil {
 		t.Fatal("expected error from Body.Close")
 	}

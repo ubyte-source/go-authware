@@ -1,99 +1,32 @@
 // Package authware provides pluggable HTTP authentication for Go servers.
 //
-// Designed for high-throughput production services where authentication must
-// be both correct and fast. Supports four modes out of the box:
+// Five mutually exclusive modes are supported: [ModeNone], [ModeBearer],
+// [ModeAPIKey], [ModeOAuth] and [ModeMTLS]. Mode selection is explicit
+// via [Config.Mode] or inferred from the populated fields.
 //
-//   - None — pass-through, no authentication
-//   - Bearer — static token comparison (constant-time)
-//   - API Key — header or Authorization scheme comparison
-//   - OAuth / JWT — full JWT validation with JWKS auto-discovery
+// [Middleware] authenticates the request, stores the [Identity] in the
+// request context, and writes a WWW-Authenticate challenge on failure.
+// [RequireCapability] composes admission predicates over the stored
+// identity; [RequireScopes] is the scope-only specialisation.
 //
-// All static comparisons use crypto/subtle.ConstantTimeCompare.
-// JWT validation uses zero-allocation unsafe string→[]byte views for
-// token parsing and single-pass claims extraction via go-jsonfast.
+// [MaxBytes] caps inbound body size, [SecurityHeaders] writes a fixed
+// pre-computed set of response headers, [CSRF] is a thin wrapper over
+// [net/http.CrossOriginProtection]. [NewRedactor] wraps a slog handler
+// to redact sensitive attribute values; [RedactHeader] does the same
+// in-place on an [net/http.Header].
 //
-// The OAuth mode implements:
-//   - JWT signature verification (HMAC-SHA256/384/512, RSA, RSA-PSS, ECDSA)
-//   - OIDC auto-discovery from any OpenID Connect provider
-//   - Automatic JWKS key rotation with cache TTL
-//   - Stampede prevention via serialized refresh with double-check
-//   - RFC 9728 Protected Resource Metadata
-//   - RFC 8414 AS Metadata via OAuth proxy
-//   - RFC 7591-compatible static client registration shim
-//   - Scope validation (scope and scp claims)
-//   - Clock skew tolerance for nbf/iat claims
+// JWT validation auto-discovers the JWKS endpoint from the issuer when
+// [Config.OAuthJWKSURL] is empty.
 //
-// # OIDC Auto-Discovery
+// [AuthCheckHandler] is an [net/http.Handler] compatible with the nginx
+// auth_request module: on success it sets X-Auth-Subject, X-Auth-Method
+// and X-Auth-Scopes response headers.
 //
-// When OAuthJWKSURL is not configured, the library automatically discovers
-// the JWKS endpoint by fetching {issuer}/.well-known/openid-configuration.
-// This works with any OIDC-compliant provider: Google, Auth0, Keycloak,
-// Azure AD, Okta, and others.
+// [OAuthProxy] bridges clients that require Dynamic Client Registration
+// with upstream IdPs where the application client is pre-registered
+// out-of-band. It exposes [OAuthProxy.ASMetadataHandler],
+// [OAuthProxy.AuthorizeHandler], [OAuthProxy.RegisterHandler] and
+// [OAuthProxy.TokenHandler].
 //
-// # Middleware
-//
-// The package provides standard HTTP middleware for common auth patterns:
-//
-//	auth, _ := authware.New(cfg, nil)
-//	mux := http.NewServeMux()
-//	mux.Handle("/api/", authware.Middleware(auth)(apiHandler))
-//	mux.Handle("/admin/", authware.Middleware(auth)(
-//	    authware.RequireScopes("admin")(adminHandler),
-//	))
-//
-// The authenticated identity is stored in the request context and can be
-// retrieved via IdentityFromContext. WithIdentity injects an identity
-// manually, which is useful in tests and custom middleware:
-//
-//	id, ok := authware.IdentityFromContext(r.Context())
-//	ctx := authware.WithIdentity(r.Context(), id)
-//
-// # Nginx auth_request
-//
-// AuthCheckHandler returns an http.Handler compatible with nginx's
-// auth_request module. On success it sets X-Auth-Subject, X-Auth-Method,
-// and X-Auth-Scopes response headers for the upstream:
-//
-//	mux.Handle("/check", authware.AuthCheckHandler(auth))
-//
-// # Environment Configuration
-//
-// ConfigFromEnv reads AUTH_* environment variables to build a Config,
-// making it easy to configure the provider without code changes:
-//
-//	cfg := authware.ConfigFromEnv()
-//	auth, err := authware.New(cfg, nil)
-//
-// # Direct Usage
-//
-//	auth, err := authware.New(cfg, nil)
-//	id, err := auth.Authenticate(r)
-//
-// # OAuth Proxy
-//
-// OAuthProxy bridges MCP clients that require RFC 7591 Dynamic Client
-// Registration (e.g. Claude Desktop) with upstream IdPs where the application
-// client is pre-registered out-of-band (e.g. Azure AD, Okta). It provides
-// four handlers: ASMetadataHandler, AuthorizeHandler, RegisterHandler,
-// and TokenHandler.
-// All proxy JSON serialization uses go-jsonfast Builder with pooled buffers.
-//
-// For confidential-client token exchange (e.g. Azure AD), set
-// OAuthClientSecret in addition to OAuthClientID. The TokenHandler
-// automatically injects client_id and client_secret into the upstream
-// token request, bridging MCP public-client flows with IdPs that require
-// a client secret.
-//
-//	proxy := authware.NewOAuthProxy(cfg, slog.Default())
-//	mux.HandleFunc("GET /.well-known/oauth-authorization-server", proxy.ASMetadataHandler())
-//	mux.HandleFunc("GET /authorize", proxy.AuthorizeHandler())
-//	mux.HandleFunc("POST /register", proxy.RegisterHandler())
-//	mux.HandleFunc("POST /token", proxy.TokenHandler())
-//
-// # Dependencies
-//
-// This library depends only on go-jsonfast
-// (https://github.com/ubyte-source/go-jsonfast) for zero-allocation JWT
-// claims parsing and proxy JSON serialization. No other external modules
-// are required.
+// [ConfigFromEnv] builds a [Config] from AUTH_* environment variables.
 package authware

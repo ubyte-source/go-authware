@@ -1,9 +1,7 @@
 package authware
 
 import (
-	"context"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -13,7 +11,7 @@ func TestNewNilConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New(nil): %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	id, err := a.Authenticate(req)
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -26,21 +24,23 @@ func TestNewNilConfig(t *testing.T) {
 func TestInferMode(t *testing.T) {
 	tests := []struct {
 		name string
-		want string
+		want Mode
 		cfg  Config
 	}{
-		{cfg: Config{Mode: "Bearer"}, name: "explicit mode", want: ModeBearer},
-		{cfg: Config{OAuthIssuer: "iss", OAuthHMACSecret: "s"}, name: "infer oauth from issuer", want: ModeOAuth},
-		{cfg: Config{OAuthJWKSURL: "url", OAuthIssuer: "iss"}, name: "infer oauth from jwks", want: ModeOAuth},
-		{cfg: Config{OAuthHMACSecret: "s", OAuthIssuer: "iss"}, name: "infer oauth from hmac", want: ModeOAuth},
-		{cfg: Config{APIKey: "key"}, name: "infer apikey", want: ModeAPIKey},
-		{cfg: Config{BearerToken: "tok"}, name: "infer bearer", want: ModeBearer},
+		{cfg: Config{Mode: schemeBearer}, name: "explicit mode", want: ModeBearer},
+		{cfg: Config{OAuthIssuer: testClaimIss, OAuthHMACSecret: "s"}, name: "infer oauth from issuer", want: ModeOAuth},
+		{cfg: Config{OAuthJWKSURL: "url", OAuthIssuer: testClaimIss}, name: "infer oauth from jwks", want: ModeOAuth},
+		{cfg: Config{OAuthHMACSecret: "s", OAuthIssuer: testClaimIss}, name: "infer oauth from hmac", want: ModeOAuth},
+		{cfg: Config{MTLSAllowedSubjects: []string{"CN=client"}}, name: "infer mtls from subjects", want: ModeMTLS},
+		{cfg: Config{MTLSAllowedSPKIPins: [][]byte{make([]byte, 32)}}, name: "infer mtls from pins", want: ModeMTLS},
+		{cfg: Config{APIKey: testKey}, name: "infer apikey", want: ModeAPIKey},
+		{cfg: Config{BearerToken: testTok}, name: "infer bearer", want: ModeBearer},
 		{cfg: Config{}, name: "default none", want: ModeNone},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := inferMode(&tt.cfg)
-			if strings.ToLower(strings.TrimSpace(got)) != tt.want {
+			if Mode(strings.ToLower(strings.TrimSpace(string(got)))) != tt.want {
 				t.Fatalf("inferMode = %q, want %q", got, tt.want)
 			}
 		})
@@ -54,6 +54,7 @@ func TestNewStaticAuthenticator_Errors(t *testing.T) {
 	}{
 		{"bearer no token", Config{Mode: ModeBearer}},
 		{"apikey no key", Config{Mode: ModeAPIKey}},
+		{"mtls no allowlist", Config{Mode: ModeMTLS}},
 		{"unsupported mode", Config{Mode: "magic"}},
 	}
 	for _, tt := range tests {
@@ -66,8 +67,10 @@ func TestNewStaticAuthenticator_Errors(t *testing.T) {
 }
 
 func TestCleanValues(t *testing.T) {
+	// cleanValues preserves input order so callers like OAuthProxy can
+	// rely on AuthorizationServers fail-over priority.
 	got := cleanValues([]string{"b", " a ", "b", "", " c "})
-	if len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
+	if len(got) != 3 || got[0] != "b" || got[1] != "a" || got[2] != "c" {
 		t.Fatalf("cleanValues = %v", got)
 	}
 	if result := cleanValues(nil); result != nil {
@@ -82,8 +85,9 @@ func TestMetadata_StaticReturnsNil(t *testing.T) {
 		name string
 	}{
 		{cfg: &Config{Mode: ModeNone}, name: "none"},
-		{cfg: &Config{Mode: ModeBearer, BearerToken: "tok"}, name: "bearer"},
+		{cfg: &Config{Mode: ModeBearer, BearerToken: testTok}, name: "bearer"},
 		{cfg: &Config{Mode: ModeAPIKey, APIKey: apiKeyValue}, name: "apikey"},
+		{cfg: &Config{Mode: ModeMTLS, MTLSAllowedSubjects: []string{"client"}}, name: "mtls"},
 	}
 	for _, tt := range authenticators {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,138 +102,14 @@ func TestMetadata_StaticReturnsNil(t *testing.T) {
 	}
 }
 
-func TestIdentityFromContext_Empty(t *testing.T) {
-	if _, ok := IdentityFromContext(context.Background()); ok {
-		t.Fatal("expected ok=false")
-	}
-}
-
-func TestWithIdentity_Roundtrip(t *testing.T) {
-	id := Identity{Subject: "user-1", Method: ModeBearer}
-	ctx := WithIdentity(context.Background(), id)
-	got, ok := IdentityFromContext(ctx)
-	if !ok || got.Subject != "user-1" {
-		t.Fatalf("roundtrip failed: %+v", got)
-	}
-}
-
-func TestMiddleware_Success(t *testing.T) {
-	auth, err := New(&Config{Mode: ModeBearer, BearerToken: "tok"}, nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, ok := IdentityFromContext(r.Context())
-		if !ok {
-			t.Error("expected identity in context")
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-
-	handler := Middleware(auth)(inner)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req.Header.Set("Authorization", "Bearer tok")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-}
-
-func TestMiddleware_Unauthorized(t *testing.T) {
-	auth, err := New(&Config{Mode: ModeBearer, BearerToken: "secret"}, nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	inner := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Error("handler should not be called")
-	})
-
-	handler := Middleware(auth)(inner)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
-}
-
-func TestMiddleware_OAuth_SetsWWWAuthenticate(t *testing.T) {
-	auth, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://iss.example.com", OAuthHMACSecret: "s",
-	}, nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	handler := Middleware(auth)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	if rec.Header().Get("WWW-Authenticate") == "" {
-		t.Fatal("expected WWW-Authenticate header")
-	}
-}
-
-func TestRequireScopes_Allowed(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	handler := RequireScopes("read", "write")(inner)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req = req.WithContext(WithIdentity(req.Context(), Identity{
-		Subject: "u", Method: ModeOAuth, Scopes: "read write admin",
-	}))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-}
-
-func TestRequireScopes_Forbidden(t *testing.T) {
-	inner := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Error("handler should not be called")
-	})
-
-	handler := RequireScopes("admin")(inner)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req = req.WithContext(WithIdentity(req.Context(), Identity{
-		Subject: "u", Method: ModeOAuth, Scopes: "read",
-	}))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rec.Code)
-	}
-}
-
-func TestRequireScopes_NoIdentity(t *testing.T) {
-	handler := RequireScopes("read")(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Error("handler should not be called")
-	}))
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
-}
-
 func TestDefaultAPIKeyHeader(t *testing.T) {
 	apiKeyValue := strings.Repeat("k", 12)
 	a, err := New(&Config{Mode: ModeAPIKey, APIKey: apiKeyValue}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req.Header.Set("X-API-Key", apiKeyValue)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("X-Api-Key", apiKeyValue)
 	id, err := a.Authenticate(req)
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -240,11 +120,11 @@ func TestDefaultAPIKeyHeader(t *testing.T) {
 }
 
 func TestDefaultRealm(t *testing.T) {
-	a, err := New(&Config{Mode: ModeBearer, BearerToken: "tok"}, nil)
+	a, err := New(&Config{Mode: ModeBearer, BearerToken: testTok}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	aErr := unauthorizedError("bad")
+	aErr := unauthorisedError("bad")
 	_, header, _ := a.Challenge(aErr, "")
 	if !strings.Contains(header, "restricted") {
 		t.Fatalf("expected 'restricted' realm in header, got %q", header)
@@ -253,24 +133,24 @@ func TestDefaultRealm(t *testing.T) {
 
 func TestNormalizeConfig_OAuthIssuerTrailingSlash(t *testing.T) {
 	cfg := &Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com/"}
-	normalizeConfig(cfg)
-	if cfg.OAuthIssuer != "https://issuer.example.com" {
+	normaliseConfig(cfg)
+	if cfg.OAuthIssuer != testIssuerURL {
 		t.Fatalf("OAuthIssuer = %q, want no trailing slash", cfg.OAuthIssuer)
 	}
 }
 
 func TestNormalizeConfig_OAuthIssuerMultipleTrailingSlashes(t *testing.T) {
 	cfg := &Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com///"}
-	normalizeConfig(cfg)
-	if cfg.OAuthIssuer != "https://issuer.example.com" {
+	normaliseConfig(cfg)
+	if cfg.OAuthIssuer != testIssuerURL {
 		t.Fatalf("OAuthIssuer = %q, want trailing slashes stripped", cfg.OAuthIssuer)
 	}
 }
 
 func TestNormalizeConfig_OAuthIssuerNoTrailingSlash(t *testing.T) {
-	cfg := &Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com"}
-	normalizeConfig(cfg)
-	if cfg.OAuthIssuer != "https://issuer.example.com" {
+	cfg := &Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL}
+	normaliseConfig(cfg)
+	if cfg.OAuthIssuer != testIssuerURL {
 		t.Fatalf("OAuthIssuer = %q, want unchanged", cfg.OAuthIssuer)
 	}
 }

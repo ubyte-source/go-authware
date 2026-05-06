@@ -2,7 +2,6 @@ package authware
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,14 +12,14 @@ func TestBearerChallenge_Format(t *testing.T) {
 		status:  http.StatusForbidden,
 		code:    "insufficient_scope",
 		message: "missing required scope",
-		scheme:  "Bearer",
+		scheme:  schemeBearer,
 		scope:   "mcp:read mcp:write",
 	}
 	status, header, _ := challengeFromError("mcp", err, "https://example.com/.well-known/oauth-protected-resource")
 	if status != http.StatusForbidden {
 		t.Fatalf("status = %d", status)
 	}
-	if !strings.Contains(header, "Bearer") {
+	if !strings.Contains(header, schemeBearer) {
 		t.Fatalf("header missing Bearer: %q", header)
 	}
 	if !strings.Contains(header, "resource_metadata") {
@@ -49,7 +48,7 @@ func TestChallengeFromError_NonBearerScheme(t *testing.T) {
 }
 
 func TestChallengeFromError_PlainError(t *testing.T) {
-	status, header, msg := challengeFromError("mcp", fmt.Errorf("oops"), "")
+	status, header, msg := challengeFromError("mcp", errors.New("oops"), "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("status = %d", status)
 	}
@@ -74,7 +73,7 @@ func TestEscapeHeaderValue(t *testing.T) {
 }
 
 func TestInsufficientScopeError(t *testing.T) {
-	err := insufficientScopeError([]string{"admin", "write"})
+	err := insufficientScopeError([]string{testAdmin, testWrite})
 	var ae *authError
 	if !errors.As(err, &ae) {
 		t.Fatalf("expected *authError, got %T", err)
@@ -85,13 +84,13 @@ func TestInsufficientScopeError(t *testing.T) {
 	if ae.code != "insufficient_scope" {
 		t.Fatalf("code = %q", ae.code)
 	}
-	if !strings.Contains(ae.scope, "admin") {
+	if !strings.Contains(ae.scope, testAdmin) {
 		t.Fatalf("scope = %q", ae.scope)
 	}
 }
 
 func TestUnauthorizedError(t *testing.T) {
-	err := unauthorizedError("bad token")
+	err := unauthorisedError("bad token")
 	var ae *authError
 	if !errors.As(err, &ae) {
 		t.Fatalf("expected *authError, got %T", err)
@@ -102,7 +101,7 @@ func TestUnauthorizedError(t *testing.T) {
 	if ae.message != "bad token" {
 		t.Fatalf("message = %q", ae.message)
 	}
-	if ae.scheme != "Bearer" {
+	if ae.scheme != schemeBearer {
 		t.Fatalf("scheme = %q", ae.scheme)
 	}
 }

@@ -2,7 +2,6 @@ package authware
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -13,7 +12,7 @@ func TestAPIKeyAuthenticator_HeaderMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "https://example.com/api", http.NoBody)
+	req := newReq(t, http.MethodGet, "https://example.com/api", http.NoBody)
 	req.Header.Set("X-Test-Key", apiKeyValue)
 	id, err := a.Authenticate(req)
 	if err != nil {
@@ -33,7 +32,7 @@ func TestAPIKeyAuthenticator_AuthorizationScheme(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "ApiKey "+apiKeyValue)
 	id, err := a.Authenticate(req)
 	if err != nil {
@@ -50,8 +49,8 @@ func TestAPIKeyAuthenticator_WrongHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req.Header.Set("X-API-Key", "wrong")
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("X-Api-Key", "wrong")
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected auth failure")
 	}
@@ -63,7 +62,7 @@ func TestAPIKeyAuthenticator_WrongAuthScheme(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "ApiKey wrong")
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected auth failure")
@@ -76,12 +75,12 @@ func TestAPIKeyAuthenticator_Challenge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	aErr := &authError{status: http.StatusUnauthorized, message: "fail", scheme: "Bearer", code: "invalid_token"}
+	aErr := &authError{status: http.StatusUnauthorized, message: testFail, scheme: schemeBearer, code: "invalid_token"}
 	status, _, msg := a.Challenge(aErr, "https://example.com/.well-known/oauth-protected-resource")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("status = %d", status)
 	}
-	if msg != "fail" {
+	if msg != testFail {
 		t.Fatalf("message = %q", msg)
 	}
 }
@@ -92,7 +91,7 @@ func TestAPIKeyAuthenticator_Metadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if md := a.Metadata("https://example.com"); md != nil {
+	if md := a.Metadata(testHTTPS); md != nil {
 		t.Fatalf("expected nil metadata, got %+v", md)
 	}
 }
@@ -106,9 +105,9 @@ func TestAPIKeyAuthenticator_FallsBackToAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req.Header.Set("X-API-Key", "wrong-value")             // custom header present but wrong
-	req.Header.Set("Authorization", "ApiKey "+apiKeyValue) // Authorization header correct
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("X-Api-Key", "wrong-value")
+	req.Header.Set("Authorization", "ApiKey "+apiKeyValue)
 	id, err := a.Authenticate(req)
 	if err != nil {
 		t.Fatalf("expected success via Authorization fallback: %v", err)
@@ -118,16 +117,14 @@ func TestAPIKeyAuthenticator_FallsBackToAuthorization(t *testing.T) {
 	}
 }
 
-// TestAPIKeyAuthenticator_BothWrong verifies that having both headers present
-// but both wrong still returns an auth failure.
 func TestAPIKeyAuthenticator_BothWrong(t *testing.T) {
 	apiKeyValue := strings.Repeat("k", 12)
 	a, err := New(&Config{Mode: ModeAPIKey, APIKey: apiKeyValue}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req.Header.Set("X-API-Key", "wrong")
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("X-Api-Key", "wrong")
 	req.Header.Set("Authorization", "ApiKey wrong")
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected auth failure when both headers have wrong value")
@@ -149,5 +146,52 @@ func TestSecureEqual(t *testing.T) {
 	}
 	if !secureEqual("", "") {
 		t.Fatal("expected equal for both empty")
+	}
+}
+
+// BenchmarkAPIKey measures the API key hot path via custom header.
+func BenchmarkAPIKey(b *testing.B) {
+	apiVal := "bench-" + strings.Repeat("x", 32)
+	auth, err := New(&Config{Mode: ModeAPIKey, APIKey: apiVal}, nil)
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	req := newReq(b, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("X-Api-Key", apiVal)
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := auth.Authenticate(req); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkAPIKeyAuthorizationHeader measures API key via Authorization header.
+func BenchmarkAPIKeyAuthorizationHeader(b *testing.B) {
+	apiVal := "bench-" + strings.Repeat("x", 32)
+	auth, err := New(&Config{Mode: ModeAPIKey, APIKey: apiVal}, nil)
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	req := newReq(b, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("Authorization", "ApiKey "+apiVal)
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := auth.Authenticate(req); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkSecureEqual measures constant-time string comparison.
+func BenchmarkSecureEqual(b *testing.B) {
+	a := strings.Repeat("x", 64)
+	c := strings.Repeat("x", 64)
+	b.ReportAllocs()
+
+	for b.Loop() {
+		_ = secureEqual(a, c)
 	}
 }

@@ -1,57 +1,141 @@
 package authware
 
-import "net/http"
+import (
+	"crypto/x509"
+	"net/http"
+	"time"
 
-// Config defines the supported HTTP authentication modes.
+	"github.com/ubyte-source/go-jsonfast"
+)
+
+// Mode names a supported HTTP authentication scheme.
+type Mode string
+
+// Supported authentication modes.
+const (
+	ModeNone   Mode = "none"
+	ModeBearer Mode = "bearer"
+	ModeAPIKey Mode = "apikey"
+	ModeOAuth  Mode = "oauth"
+	ModeMTLS   Mode = "mtls"
+)
+
+// Config selects the authentication mode and carries its parameters.
 type Config struct {
-	// Mode is the authentication mode: "none", "bearer", "apikey", or "oauth".
-	Mode string
-	// Realm is the realm included in WWW-Authenticate challenges (default: "restricted").
-	Realm string
-	// BearerToken is the expected static bearer token (bearer mode only).
-	BearerToken string
-	// APIKey is the expected static API key value (apikey mode only).
-	APIKey string
-	// APIKeyHeader is the request header that carries the API key (default: "X-API-Key").
-	APIKeyHeader string
-	// OAuthIssuer is the token issuer URL; must match the "iss" claim (oauth mode).
-	OAuthIssuer string
-	// OAuthAudience is the required audience claim; empty means any audience is accepted.
-	OAuthAudience string
-	// OAuthJWKSURL overrides the JWKS endpoint; auto-discovered via OIDC if empty.
-	OAuthJWKSURL string
-	// OAuthHMACSecret enables HMAC (HS256/HS384/HS512) validation with a shared secret.
-	// Intended for testing only; prefer asymmetric keys in production.
-	OAuthHMACSecret string
-	// OAuthResource is the protected resource URI served in RFC 9728 metadata.
-	OAuthResource string
-	// OAuthResourceDocumentation is the URL of the resource documentation,
-	// included in RFC 9728 metadata when non-empty.
+	OAuthHTTPClient *http.Client
+
+	OAuthJWKSURL               string
+	OAuthHMACSecret            string
+	OAuthClientSecret          string
+	OAuthAudience              string
+	Mode                       Mode
+	Realm                      string
+	OAuthResourceName          string
+	APIKey                     string
+	APIKeyHeader               string
+	OAuthIssuer                string
 	OAuthResourceDocumentation string
-	// OAuthResourceName is the human-readable resource name included in RFC 9728 metadata.
-	OAuthResourceName string
-	// OAuthClientID is the upstream IdP client_id returned by the built-in DCR shim.
-	OAuthClientID string
-	// OAuthClientSecret is the upstream IdP client_secret for confidential-client token exchange.
-	OAuthClientSecret string
-	// OAuthRequiredScopes lists the scopes every token must possess.
-	OAuthRequiredScopes []string
-	// OAuthAuthorizationServers lists the authorization server URLs advertised in
-	// RFC 9728 metadata and used for OIDC discovery.
+	BearerToken                string
+	OAuthClientID              string
+	OAuthResource              string
+
+	OAuthRequiredScopes       []string
 	OAuthAuthorizationServers []string
+	MTLSAllowedSubjects       []string
+	MTLSAllowedSPKIPins       [][]byte
+	SecureCSRFTrusted         []string
+
+	SecureHeaders SecureHeadersConfig
+
+	OAuthClockSkewTolerance time.Duration
+	OAuthJWKSCacheTTL       time.Duration
+	SecureMaxRequestBytes   int64
+	OAuthProxyFetchTimeout  time.Duration
 }
 
-// Identity describes the authenticated caller.
+// Identity describes the authenticated caller. Static modes return a
+// shared singleton; OAuth and mTLS allocate per request. Identity must
+// be treated as read-only.
 type Identity struct {
-	// Subject is the authenticated principal: the "sub" claim, or "client_id"/"azp" as fallback.
-	Subject string
-	// Method is the authentication mode that produced this identity (e.g. ModeOAuth, ModeBearer).
-	Method string
-	// Scopes is the space-separated list of OAuth scopes granted to this identity.
-	Scopes string
+	PeerCert  *x509.Certificate
+	Subject   string
+	Method    Mode
+	claimsRaw string
+	Scopes    []string
 }
 
-// ProtectedResourceMetadata is served from RFC 9728 metadata discovery endpoints.
+// Claim returns the named JWT claim decoded into a Go value: string,
+// int64, float64, bool, nil, or the raw JSON for objects/arrays.
+func (id *Identity) Claim(name string) (any, bool) {
+	if id == nil || id.claimsRaw == "" {
+		return nil, false
+	}
+	raw, ok := jsonfast.FindFieldString(id.claimsRaw, name)
+	if !ok {
+		return nil, false
+	}
+	return decodeClaimValue(raw), true
+}
+
+// ClaimString returns the named string claim.
+func (id *Identity) ClaimString(name string) (string, bool) {
+	raw, ok := id.rawField(name)
+	if !ok || len(raw) == 0 || raw[0] != '"' {
+		return "", false
+	}
+	return jsonfast.DecodeString(raw)
+}
+
+// ClaimInt64 returns the named integer claim.
+func (id *Identity) ClaimInt64(name string) (int64, bool) {
+	raw, ok := id.rawField(name)
+	if !ok {
+		return 0, false
+	}
+	return jsonfast.DecodeInt64(raw)
+}
+
+// ClaimBool returns the named boolean claim.
+func (id *Identity) ClaimBool(name string) (value, ok bool) {
+	raw, found := id.rawField(name)
+	if !found {
+		return false, false
+	}
+	return jsonfast.DecodeBool(raw)
+}
+
+// ClaimFloat64 returns the named numeric claim as a float.
+func (id *Identity) ClaimFloat64(name string) (float64, bool) {
+	raw, ok := id.rawField(name)
+	if !ok {
+		return 0, false
+	}
+	return jsonfast.DecodeFloat64(raw)
+}
+
+func (id *Identity) rawField(name string) ([]byte, bool) {
+	if id == nil || id.claimsRaw == "" {
+		return nil, false
+	}
+	return jsonfast.FindFieldString(id.claimsRaw, name)
+}
+
+// RangeClaims iterates every top-level JWT claim. The name is valid only
+// for the duration of the callback; clone via strings.Clone to retain.
+func (id *Identity) RangeClaims(fn func(name string, value any) bool) bool {
+	if id == nil || id.claimsRaw == "" {
+		return true
+	}
+	return jsonfast.IterateFieldsString(id.claimsRaw, func(key, value []byte) bool {
+		if len(key) < 2 || key[0] != '"' || key[len(key)-1] != '"' {
+			return true
+		}
+		return fn(string(key[1:len(key)-1]), decodeClaimValue(value))
+	})
+}
+
+// ProtectedResourceMetadata is the Protected Resource Metadata document
+// served by [oauthAuthenticator.Metadata].
 type ProtectedResourceMetadata struct {
 	Resource               string   `json:"resource"`
 	ResourceDocumentation  string   `json:"resource_documentation,omitempty"`
@@ -63,18 +147,26 @@ type ProtectedResourceMetadata struct {
 
 // Authenticator validates an inbound HTTP request.
 type Authenticator interface {
-	// Authenticate returns the authenticated identity or an error.
-	Authenticate(r *http.Request) (Identity, error)
-	// Challenge returns the HTTP status, WWW-Authenticate header, and error message.
-	Challenge(err error, resourceMetadataURL string) (status int, header string, message string)
-	// Metadata returns RFC 9728 Protected Resource Metadata, or nil if not applicable.
+	Authenticate(r *http.Request) (*Identity, error)
+	Challenge(err error, resourceMetadataURL string) (status int, header, message string)
 	Metadata(resource string) *ProtectedResourceMetadata
 }
 
-// contextKey is the context.Value key for storing Identity.
+// SecureHeadersConfig configures the [SecurityHeaders] middleware.
+type SecureHeadersConfig struct {
+	CSP                string
+	FrameOptions       string
+	ReferrerPolicy     string
+	PermissionsPolicy  string
+	XSSProtection      string
+	HSTSMaxAge         int
+	HSTSIncludeSubs    bool
+	HSTSPreload        bool
+	ContentTypeNosniff bool
+}
+
 type contextKey struct{}
 
-// authError carries structured error details for WWW-Authenticate challenge generation.
 type authError struct {
 	message string
 	code    string
@@ -83,6 +175,4 @@ type authError struct {
 	status  int
 }
 
-func (e *authError) Error() string {
-	return e.message
-}
+func (e *authError) Error() string { return e.message }

@@ -24,23 +24,23 @@ import (
 	"time"
 )
 
-func signHS256Token(t *testing.T, header, claims map[string]any, secret string) string {
-	t.Helper()
+func signHS256Token(tb testing.TB, header, claims map[string]any, secret string) string {
+	tb.Helper()
 
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
-		t.Fatalf("marshal header: %v", err)
+		tb.Fatalf("marshal header: %v", err)
 	}
 	claimsJSON, err := json.Marshal(claims)
 	if err != nil {
-		t.Fatalf("marshal claims: %v", err)
+		tb.Fatalf("marshal claims: %v", err)
 	}
 
 	enc := base64.RawURLEncoding
 	signingInput := enc.EncodeToString(headerJSON) + "." + enc.EncodeToString(claimsJSON)
 	mac := hmac.New(sha256.New, []byte(secret))
 	if _, err := mac.Write([]byte(signingInput)); err != nil {
-		t.Fatalf("mac.Write: %v", err)
+		tb.Fatalf("mac.Write: %v", err)
 	}
 	return signingInput + "." + enc.EncodeToString(mac.Sum(nil))
 }
@@ -50,7 +50,7 @@ func signRSAToken(
 	claims map[string]any,
 ) string {
 	t.Helper()
-	header := map[string]any{"alg": "RS256", "typ": "JWT", "kid": kid}
+	header := map[string]any{testClaimAlg: algRS256, testClaimTyp: testHeaderJWT, testClaimKid: kid}
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
 		t.Fatalf("marshal header: %v", err)
@@ -74,13 +74,13 @@ func rsaJWKSHandler(t *testing.T, key *rsa.PublicKey, kid string) http.HandlerFu
 	t.Helper()
 	return func(w http.ResponseWriter, _ *http.Request) {
 		set := jwkSet{Keys: []jwk{{
-			Kty: "RSA",
+			Kty: jwkTypeRSA,
 			Kid: kid,
-			Alg: "RS256",
+			Alg: algRS256,
 			N:   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
 			E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
 		}}}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", testTypeJSON)
 		if err := json.NewEncoder(w).Encode(set); err != nil {
 			t.Errorf("encode JWKS: %v", err)
 		}
@@ -90,33 +90,33 @@ func rsaJWKSHandler(t *testing.T, key *rsa.PublicKey, kid string) http.HandlerFu
 func TestOAuthHMACAuthenticator(t *testing.T) {
 	now := time.Now()
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub":   "user-123",
-			"iss":   "https://issuer.example.com",
-			"aud":   []string{"mcp-server"},
-			"scope": "mcp:read mcp:write",
-			"iat":   now.Unix(),
-			"nbf":   now.Add(-time.Minute).Unix(),
-			"exp":   now.Add(time.Hour).Unix(),
+			testClaimSub: "user-123",
+			testClaimIss: testIssuerURL,
+			testClaimAud: []string{testMCPServer},
+			"scope":      "mcp:read mcp:write",
+			testClaimIat: now.Unix(),
+			"nbf":        now.Add(-time.Minute).Unix(),
+			testClaimExp: now.Add(time.Hour).Unix(),
 		},
 		"top-secret",
 	)
 
 	a, err := New(&Config{
 		Mode:                      ModeOAuth,
-		OAuthIssuer:               "https://issuer.example.com",
-		OAuthAudience:             "mcp-server",
+		OAuthIssuer:               testIssuerURL,
+		OAuthAudience:             testMCPServer,
 		OAuthHMACSecret:           "top-secret",
-		OAuthRequiredScopes:       []string{"mcp:read"},
+		OAuthRequiredScopes:       []string{testScopeMCPRead},
 		OAuthResourceName:         "MCP Server",
-		OAuthAuthorizationServers: []string{"https://issuer.example.com"},
+		OAuthAuthorizationServers: []string{testIssuerURL},
 	}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "https://mcp.example.com/jsonrpc", http.NoBody)
+	req := newReq(t, http.MethodGet, "https://mcp.example.com/jsonrpc", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	id, err := a.Authenticate(req)
@@ -134,7 +134,7 @@ func TestOAuthHMACAuthenticator(t *testing.T) {
 	if md.Resource != "https://mcp.example.com/jsonrpc" {
 		t.Fatalf("Resource = %q", md.Resource)
 	}
-	if len(md.AuthorizationServers) != 1 || md.AuthorizationServers[0] != "https://issuer.example.com" {
+	if len(md.AuthorizationServers) != 1 || md.AuthorizationServers[0] != testIssuerURL {
 		t.Fatalf("AuthorizationServers = %#v", md.AuthorizationServers)
 	}
 }
@@ -148,7 +148,7 @@ func TestNewOAuth_MissingIssuer(t *testing.T) {
 func TestNewOAuth_OIDCDiscoveryFallback(t *testing.T) {
 	// Without HMAC secret or JWKS URL, the authenticator should be created
 	// successfully (OIDC discovery resolves the JWKS URL lazily at runtime).
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -160,8 +160,8 @@ func TestNewOAuth_OIDCDiscoveryFallback(t *testing.T) {
 func TestOAuthMetadata_OverrideResource(t *testing.T) {
 	a, err := New(&Config{
 		Mode:            ModeOAuth,
-		OAuthIssuer:     "https://issuer.example.com",
-		OAuthHMACSecret: "secret",
+		OAuthIssuer:     testIssuerURL,
+		OAuthHMACSecret: testSecret,
 		OAuthResource:   "https://override.example.com/api",
 	}, nil)
 	if err != nil {
@@ -179,8 +179,8 @@ func TestOAuthMetadata_OverrideResource(t *testing.T) {
 func TestOAuthMetadata_EmptyResource(t *testing.T) {
 	a, err := New(&Config{
 		Mode:            ModeOAuth,
-		OAuthIssuer:     "https://issuer.example.com",
-		OAuthHMACSecret: "secret",
+		OAuthIssuer:     testIssuerURL,
+		OAuthHMACSecret: testSecret,
 	}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -193,8 +193,8 @@ func TestOAuthMetadata_EmptyResource(t *testing.T) {
 func TestOAuthMetadata_ProxyMode_OmitsAuthorizationServers(t *testing.T) {
 	a, err := New(&Config{
 		Mode:                      ModeOAuth,
-		OAuthIssuer:               "https://issuer.example.com",
-		OAuthHMACSecret:           "secret",
+		OAuthIssuer:               testIssuerURL,
+		OAuthHMACSecret:           testSecret,
 		OAuthResource:             "https://api.example.com",
 		OAuthClientID:             "my-client-id", // triggers proxy mode
 		OAuthAuthorizationServers: []string{"https://upstream.example.com"},
@@ -214,8 +214,8 @@ func TestOAuthMetadata_ProxyMode_OmitsAuthorizationServers(t *testing.T) {
 func TestOAuthMetadata_NonProxyMode_IncludesAuthorizationServers(t *testing.T) {
 	a, err := New(&Config{
 		Mode:                      ModeOAuth,
-		OAuthIssuer:               "https://issuer.example.com",
-		OAuthHMACSecret:           "secret",
+		OAuthIssuer:               testIssuerURL,
+		OAuthHMACSecret:           testSecret,
 		OAuthResource:             "https://api.example.com",
 		OAuthAuthorizationServers: []string{"https://upstream.example.com"},
 		// OAuthClientID is empty → no proxy mode
@@ -235,8 +235,8 @@ func TestOAuthMetadata_NonProxyMode_IncludesAuthorizationServers(t *testing.T) {
 func TestOAuth_MalformedJWT(t *testing.T) {
 	a, err := New(&Config{
 		Mode:            ModeOAuth,
-		OAuthIssuer:     "https://issuer.example.com",
-		OAuthHMACSecret: "secret",
+		OAuthIssuer:     testIssuerURL,
+		OAuthHMACSecret: testSecret,
 	}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -245,7 +245,7 @@ func TestOAuth_MalformedJWT(t *testing.T) {
 		name  string
 		token string
 	}{
-		{"empty", ""},
+		{testEmpty, ""},
 		{"no dots", "foobar"},
 		{"one dot", "foo.bar"},
 		{"bad header b64", "!!!.YQ.YQ"},
@@ -253,7 +253,7 @@ func TestOAuth_MalformedJWT(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			req := newReq(t, http.MethodGet, "/", http.NoBody)
 			req.Header.Set("Authorization", "Bearer "+tt.token)
 			if _, err := a.Authenticate(req); err == nil {
 				t.Fatal("expected error")
@@ -265,13 +265,13 @@ func TestOAuth_MalformedJWT(t *testing.T) {
 func TestOAuth_MissingBearerToken(t *testing.T) {
 	a, err := New(&Config{
 		Mode:            ModeOAuth,
-		OAuthIssuer:     "https://issuer.example.com",
-		OAuthHMACSecret: "secret",
+		OAuthIssuer:     testIssuerURL,
+		OAuthHMACSecret: testSecret,
 	}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected error for missing token")
 	}
@@ -279,19 +279,19 @@ func TestOAuth_MissingBearerToken(t *testing.T) {
 
 func TestOAuth_ExpiredToken(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com",
-			"exp": time.Now().Add(-time.Hour).Unix(),
-			"iat": time.Now().Add(-2 * time.Hour).Unix(),
+			testClaimSub: testUser, testClaimIss: testIssuerURL,
+			testClaimExp: time.Now().Add(-time.Hour).Unix(),
+			testClaimIat: time.Now().Add(-2 * time.Hour).Unix(),
 		},
-		"secret",
+		testSecret,
 	)
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected token expired error")
@@ -300,19 +300,19 @@ func TestOAuth_ExpiredToken(t *testing.T) {
 
 func TestOAuth_WrongIssuer(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user", "iss": "https://wrong.example.com",
-			"exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(),
+			testClaimSub: testUser, testClaimIss: "https://wrong.example.com",
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
+			testClaimIat: time.Now().Unix(),
 		},
-		"secret",
+		testSecret,
 	)
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected issuer error")
@@ -321,22 +321,22 @@ func TestOAuth_WrongIssuer(t *testing.T) {
 
 func TestOAuth_WrongAudience(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com", "aud": "other",
-			"exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(),
+			testClaimSub: testUser, testClaimIss: testIssuerURL, testClaimAud: "other",
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
+			testClaimIat: time.Now().Unix(),
 		},
-		"secret",
+		testSecret,
 	)
 	a, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com",
-		OAuthAudience: "mcp-server", OAuthHMACSecret: "secret",
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL,
+		OAuthAudience: testMCPServer, OAuthHMACSecret: testSecret,
 	}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected audience error")
@@ -345,19 +345,19 @@ func TestOAuth_WrongAudience(t *testing.T) {
 
 func TestOAuth_WrongSignature(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com",
-			"exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(),
+			testClaimSub: testUser, testClaimIss: testIssuerURL,
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
+			testClaimIat: time.Now().Unix(),
 		},
 		"wrong-secret",
 	)
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected signature error")
@@ -366,18 +366,18 @@ func TestOAuth_WrongSignature(t *testing.T) {
 
 func TestOAuth_UnsupportedHMACAlg(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS999", "typ": "JWT"},
+		map[string]any{testClaimAlg: "HS999", testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com",
-			"exp": time.Now().Add(time.Hour).Unix(),
+			testClaimSub: testUser, testClaimIss: testIssuerURL,
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
 		},
-		"secret",
+		testSecret,
 	)
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected unsupported alg error")
@@ -389,15 +389,15 @@ func TestOAuth_HMACAlgorithms(t *testing.T) {
 		hasher func() hash.Hash
 		alg    string
 	}{
-		{sha512.New384, "HS384"},
-		{sha512.New, "HS512"},
+		{sha512.New384, algHS384},
+		{sha512.New, algHS512},
 	} {
 		t.Run(tc.alg, func(t *testing.T) {
 			now := time.Now()
-			header := map[string]any{"alg": tc.alg, "typ": "JWT"}
+			header := map[string]any{testClaimAlg: tc.alg, testClaimTyp: testHeaderJWT}
 			claims := map[string]any{
-				"sub": "user", "iss": "https://issuer.example.com",
-				"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+				testClaimSub: testUser, testClaimIss: testIssuerURL,
+				testClaimExp: now.Add(time.Hour).Unix(), testClaimIat: now.Unix(),
 			}
 			headerJSON, hErr := json.Marshal(header)
 			if hErr != nil {
@@ -409,21 +409,21 @@ func TestOAuth_HMACAlgorithms(t *testing.T) {
 			}
 			enc := base64.RawURLEncoding
 			signingInput := enc.EncodeToString(headerJSON) + "." + enc.EncodeToString(claimsJSON)
-			mac := hmac.New(tc.hasher, []byte("secret"))
+			mac := hmac.New(tc.hasher, []byte(testSecret))
 			_, _ = mac.Write([]byte(signingInput))
 			token := signingInput + "." + enc.EncodeToString(mac.Sum(nil))
 
-			a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+			a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			req := newReq(t, http.MethodGet, "/", http.NoBody)
 			req.Header.Set("Authorization", "Bearer "+token)
 			id, err := a.Authenticate(req)
 			if err != nil {
 				t.Fatalf("Authenticate %s: %v", tc.alg, err)
 			}
-			if id.Subject != "user" {
+			if id.Subject != testUser {
 				t.Fatalf("Subject = %q", id.Subject)
 			}
 		})
@@ -432,20 +432,20 @@ func TestOAuth_HMACAlgorithms(t *testing.T) {
 
 func TestOAuth_TokenNotBeforeViolation(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com",
-			"exp": time.Now().Add(time.Hour).Unix(),
-			"nbf": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(),
+			testClaimSub: testUser, testClaimIss: testIssuerURL,
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
+			"nbf":        time.Now().Add(time.Hour).Unix(),
+			testClaimIat: time.Now().Unix(),
 		},
-		"secret",
+		testSecret,
 	)
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected nbf error")
@@ -454,19 +454,19 @@ func TestOAuth_TokenNotBeforeViolation(t *testing.T) {
 
 func TestOAuth_TokenIssuedInFuture(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com",
-			"exp": time.Now().Add(2 * time.Hour).Unix(),
-			"iat": time.Now().Add(time.Hour).Unix(),
+			testClaimSub: testUser, testClaimIss: testIssuerURL,
+			testClaimExp: time.Now().Add(2 * time.Hour).Unix(),
+			testClaimIat: time.Now().Add(time.Hour).Unix(),
 		},
-		"secret",
+		testSecret,
 	)
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected iat-in-future error")
@@ -475,29 +475,29 @@ func TestOAuth_TokenIssuedInFuture(t *testing.T) {
 
 func TestOAuth_ScopeFromSCPClaim(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com",
-			"exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(),
-			"scp": "read write",
+			testClaimSub: testUser, testClaimIss: testIssuerURL,
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
+			testClaimIat: time.Now().Unix(),
+			"scp":        testReadW,
 		},
-		"secret",
+		testSecret,
 	)
 	a, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com",
-		OAuthHMACSecret: "secret", OAuthRequiredScopes: []string{"read"},
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL,
+		OAuthHMACSecret: testSecret, OAuthRequiredScopes: []string{testRead},
 	}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	id, err := a.Authenticate(req)
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.Scopes == "" {
+	if len(id.Scopes) == 0 {
 		t.Fatal("expected scopes")
 	}
 }
@@ -508,21 +508,21 @@ func TestOAuth_SubjectFallbacks(t *testing.T) {
 		claims map[string]any
 		want   string
 	}{
-		{"client_id", map[string]any{"client_id": "my-client"}, "my-client"},
+		{"client_id", map[string]any{"client_id": testClient}, testClient},
 		{"azp", map[string]any{"azp": "my-azp-client"}, "my-azp-client"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.claims["iss"] = "https://issuer.example.com"
-			tc.claims["exp"] = time.Now().Add(time.Hour).Unix()
-			tc.claims["iat"] = time.Now().Unix()
+			tc.claims[testClaimIss] = testIssuerURL
+			tc.claims[testClaimExp] = time.Now().Add(time.Hour).Unix()
+			tc.claims[testClaimIat] = time.Now().Unix()
 			token := signHS256Token(t,
-				map[string]any{"alg": "HS256", "typ": "JWT"}, tc.claims, "secret")
-			a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+				map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT}, tc.claims, testSecret)
+			a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			req := newReq(t, http.MethodGet, "/", http.NoBody)
 			req.Header.Set("Authorization", "Bearer "+token)
 			id, authErr := a.Authenticate(req)
 			if authErr != nil {
@@ -537,17 +537,17 @@ func TestOAuth_SubjectFallbacks(t *testing.T) {
 
 func TestOAuth_Challenge(t *testing.T) {
 	a, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret",
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret,
 	}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	aErr := unauthorizedError("bad token")
+	aErr := unauthorisedError("bad token")
 	status, header, msg := a.Challenge(aErr, "https://example.com/.well-known/oauth-protected-resource")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("status = %d", status)
 	}
-	if !strings.Contains(header, "Bearer") {
+	if !strings.Contains(header, schemeBearer) {
 		t.Fatalf("header = %q", header)
 	}
 	if msg != "bad token" {
@@ -558,22 +558,22 @@ func TestOAuth_Challenge(t *testing.T) {
 func TestOAuthAuthenticator_RejectsMissingScope(t *testing.T) {
 	now := time.Now()
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub":   "user-123",
-			"iss":   "https://issuer.example.com",
-			"aud":   "mcp-server",
-			"scope": "mcp:read",
-			"iat":   now.Unix(),
-			"exp":   now.Add(time.Hour).Unix(),
+			testClaimSub: "user-123",
+			testClaimIss: testIssuerURL,
+			testClaimAud: testMCPServer,
+			"scope":      testScopeMCPRead,
+			testClaimIat: now.Unix(),
+			testClaimExp: now.Add(time.Hour).Unix(),
 		},
 		"top-secret",
 	)
 
 	a, err := New(&Config{
 		Mode:                ModeOAuth,
-		OAuthIssuer:         "https://issuer.example.com",
-		OAuthAudience:       "mcp-server",
+		OAuthIssuer:         testIssuerURL,
+		OAuthAudience:       testMCPServer,
 		OAuthHMACSecret:     "top-secret",
 		OAuthRequiredScopes: []string{"mcp:admin"},
 	}, nil)
@@ -581,7 +581,7 @@ func TestOAuthAuthenticator_RejectsMissingScope(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "https://mcp.example.com/jsonrpc", http.NoBody)
+	req := newReq(t, http.MethodGet, "https://mcp.example.com/jsonrpc", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	_, err = a.Authenticate(req)
@@ -592,8 +592,6 @@ func TestOAuthAuthenticator_RejectsMissingScope(t *testing.T) {
 		t.Fatalf("expected scope error, got %v", err)
 	}
 }
-
-// ── JWKS RSA tests ───────────────────────────────────────────
 
 func TestOAuth_JWKS_RSA(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -606,20 +604,20 @@ func TestOAuth_JWKS_RSA(t *testing.T) {
 
 	now := time.Now()
 	token := signRSAToken(t, key, "test-kid", map[string]any{
-		"sub": "rsa-user", "iss": "https://issuer.example.com",
-		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+		testClaimSub: "rsa-user", testClaimIss: testIssuerURL,
+		testClaimExp: now.Add(time.Hour).Unix(), testClaimIat: now.Unix(),
 	})
 
 	a, err := New(&Config{
 		Mode:         ModeOAuth,
-		OAuthIssuer:  "https://issuer.example.com",
+		OAuthIssuer:  testIssuerURL,
 		OAuthJWKSURL: jwksServer.URL,
 	}, jwksServer.Client())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	id, err := a.Authenticate(req)
 	if err != nil {
@@ -645,24 +643,22 @@ func TestOAuth_JWKS_RSA_WrongKey(t *testing.T) {
 
 	now := time.Now()
 	token := signRSAToken(t, signKey, "wrong-kid", map[string]any{
-		"sub": "user", "iss": "https://issuer.example.com",
-		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+		testClaimSub: testUser, testClaimIss: testIssuerURL,
+		testClaimExp: now.Add(time.Hour).Unix(), testClaimIat: now.Unix(),
 	})
 
 	a, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthJWKSURL: jwksServer.URL,
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthJWKSURL: jwksServer.URL,
 	}, jwksServer.Client())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected verification error with wrong key")
 	}
 }
-
-// ── JWKS EC test ─────────────────────────────────────────────
 
 func TestOAuth_JWKS_EC(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -673,12 +669,12 @@ func TestOAuth_JWKS_EC(t *testing.T) {
 	kid := "ec-kid"
 	enc := base64.RawURLEncoding
 	set := jwkSet{Keys: []jwk{{
-		Kty: "EC", Crv: "P-256", Kid: kid, Alg: "ES256",
+		Kty: jwkTypeEC, Crv: "P-256", Kid: kid, Alg: algES256,
 		X: enc.EncodeToString(key.X.Bytes()),
 		Y: enc.EncodeToString(key.Y.Bytes()),
 	}}}
 	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", testTypeJSON)
 		if encErr := json.NewEncoder(w).Encode(set); encErr != nil {
 			t.Errorf("encode JWKS: %v", encErr)
 		}
@@ -686,10 +682,10 @@ func TestOAuth_JWKS_EC(t *testing.T) {
 	defer jwksServer.Close()
 
 	now := time.Now()
-	header := map[string]any{"alg": "ES256", "typ": "JWT", "kid": kid}
+	header := map[string]any{testClaimAlg: algES256, testClaimTyp: testHeaderJWT, testClaimKid: kid}
 	claims := map[string]any{
-		"sub": "ec-user", "iss": "https://issuer.example.com",
-		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+		testClaimSub: "ec-user", testClaimIss: testIssuerURL,
+		testClaimExp: now.Add(time.Hour).Unix(), testClaimIat: now.Unix(),
 	}
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
@@ -708,12 +704,12 @@ func TestOAuth_JWKS_EC(t *testing.T) {
 	token := signingInput + "." + enc.EncodeToString(sig)
 
 	a, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthJWKSURL: jwksServer.URL,
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthJWKSURL: jwksServer.URL,
 	}, jwksServer.Client())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	id, err := a.Authenticate(req)
 	if err != nil {
@@ -731,7 +727,7 @@ func TestOAuth_JWKS_ServerError(t *testing.T) {
 	defer jwksServer.Close()
 
 	a, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthJWKSURL: jwksServer.URL,
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthJWKSURL: jwksServer.URL,
 	}, jwksServer.Client())
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -739,14 +735,14 @@ func TestOAuth_JWKS_ServerError(t *testing.T) {
 
 	now := time.Now()
 	token := signHS256Token(t,
-		map[string]any{"alg": "RS256", "typ": "JWT", "kid": "x"},
+		map[string]any{testClaimAlg: algRS256, testClaimTyp: testHeaderJWT, testClaimKid: "x"},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com",
-			"exp": now.Add(time.Hour).Unix(),
+			testClaimSub: testUser, testClaimIss: testIssuerURL,
+			testClaimExp: now.Add(time.Hour).Unix(),
 		},
 		"irrelevant",
 	)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected error from JWKS server failure")
@@ -763,7 +759,7 @@ func TestOAuth_JWKS_UnsupportedKeyType(t *testing.T) {
 	defer jwksServer.Close()
 
 	a, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthJWKSURL: jwksServer.URL,
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthJWKSURL: jwksServer.URL,
 	}, jwksServer.Client())
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -771,14 +767,14 @@ func TestOAuth_JWKS_UnsupportedKeyType(t *testing.T) {
 
 	now := time.Now()
 	token := signHS256Token(t,
-		map[string]any{"alg": "RS256", "typ": "JWT", "kid": "ed-key"},
+		map[string]any{testClaimAlg: algRS256, testClaimTyp: testHeaderJWT, testClaimKid: "ed-key"},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com",
-			"exp": now.Add(time.Hour).Unix(),
+			testClaimSub: testUser, testClaimIss: testIssuerURL,
+			testClaimExp: now.Add(time.Hour).Unix(),
 		},
 		"irrelevant",
 	)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected unsupported key type error")
@@ -795,21 +791,21 @@ func TestOAuth_JWKS_NoMatchingKey(t *testing.T) {
 	defer jwksServer.Close()
 
 	a, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthJWKSURL: jwksServer.URL,
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthJWKSURL: jwksServer.URL,
 	}, jwksServer.Client())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	now := time.Now()
 	token := signHS256Token(t,
-		map[string]any{"alg": "RS256", "typ": "JWT", "kid": "nope"},
+		map[string]any{testClaimAlg: algRS256, testClaimTyp: testHeaderJWT, testClaimKid: "nope"},
 		map[string]any{
-			"sub": "user", "iss": "https://issuer.example.com",
-			"exp": now.Add(time.Hour).Unix(),
+			testClaimSub: testUser, testClaimIss: testIssuerURL,
+			testClaimExp: now.Add(time.Hour).Unix(),
 		},
 		"irrelevant",
 	)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected no key found error")
@@ -823,7 +819,7 @@ func TestOAuth_JWKS_PSS_FullFlow(t *testing.T) {
 	}
 	kid := "pss-kid"
 	set := jwkSet{Keys: []jwk{{
-		Kty: "RSA", Kid: kid, Alg: "PS256",
+		Kty: jwkTypeRSA, Kid: kid, Alg: algPS256,
 		N: base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
 		E: base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
 	}}}
@@ -835,10 +831,10 @@ func TestOAuth_JWKS_PSS_FullFlow(t *testing.T) {
 	defer srv.Close()
 
 	now := time.Now()
-	header := map[string]any{"alg": "PS256", "typ": "JWT", "kid": kid}
+	header := map[string]any{testClaimAlg: algPS256, testClaimTyp: testHeaderJWT, testClaimKid: kid}
 	claims := map[string]any{
-		"sub": "pss-user", "iss": "https://issuer.example.com",
-		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+		testClaimSub: "pss-user", testClaimIss: testIssuerURL,
+		testClaimExp: now.Add(time.Hour).Unix(), testClaimIat: now.Unix(),
 	}
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
@@ -858,12 +854,12 @@ func TestOAuth_JWKS_PSS_FullFlow(t *testing.T) {
 	token := signingInput + "." + enc.EncodeToString(sig)
 
 	a, err := New(&Config{
-		Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthJWKSURL: srv.URL,
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthJWKSURL: srv.URL,
 	}, srv.Client())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	id, err := a.Authenticate(req)
 	if err != nil {
@@ -873,8 +869,6 @@ func TestOAuth_JWKS_PSS_FullFlow(t *testing.T) {
 		t.Fatalf("Subject = %q", id.Subject)
 	}
 }
-
-// ── Internal JWT helper tests ────────────────────────────────
 
 func TestContainsAudienceRaw(t *testing.T) {
 	if !containsAudienceRaw([]byte(`"single"`), "single") {
@@ -921,42 +915,49 @@ func TestEqualQuotedBytes(t *testing.T) {
 	}
 }
 
-func TestParseJSONNumber(t *testing.T) {
-	if v, ok := parseJSONNumber([]byte("1713052800")); !ok || v != 1713052800 {
-		t.Fatalf("integer: %d, %v", v, ok)
-	}
-	if v, ok := parseJSONNumber([]byte("42.0")); !ok || v != 42 {
-		t.Fatalf("float: %d, %v", v, ok)
-	}
-	if _, ok := parseJSONNumber([]byte("notnum")); ok {
-		t.Fatal("notnum should fail")
-	}
-	if _, ok := parseJSONNumber(nil); ok {
-		t.Fatal("nil should fail")
+func TestValidateTimeBound_PastIsAccepted(t *testing.T) {
+	if err := validateTimeBound([]byte("1"), 1_000_000_000, jwtClockSkewSec, errTokenNotYetValid); err != nil {
+		t.Fatalf("past timestamp must be accepted: %v", err)
 	}
 }
 
-func TestAlgFromBytes(t *testing.T) {
+func TestValidateTimeBound_FutureBeyondSkew(t *testing.T) {
+	now := int64(1_000_000_000)
+	if err := validateTimeBound([]byte("1000000060"), now, jwtClockSkewSec, errTokenNotYetValid); err == nil {
+		t.Fatal("future > skew must fail")
+	}
+}
+
+func TestValidateTimeBound_FutureFloat(t *testing.T) {
+	now := int64(1_000_000_000)
+	if err := validateTimeBound([]byte("1000000060.0"), now, jwtClockSkewSec, errTokenNotYetValid); err == nil {
+		t.Fatal("future float > skew must fail")
+	}
+}
+
+// TestValidateTimeBound_Malformed pins the new strict semantics: a present
+// but unparseable JWT time claim is rejected.
+func TestValidateTimeBound_Malformed(t *testing.T) {
+	if err := validateTimeBound([]byte("notnum"), 1, jwtClockSkewSec, errTokenNotYetValid); err == nil {
+		t.Fatal("malformed timestamp must be rejected")
+	}
+}
+
+func TestDecodeAlg(t *testing.T) {
 	algs := []string{
-		"HS256", "HS384", "HS512",
-		"RS256", "RS384", "RS512",
-		"ES256", "ES384", "ES512",
+		algHS256, algHS384, algHS512,
+		algRS256, algRS384, algRS512,
+		algES256, algES384, algES512,
+		algPS256, algPS384, algPS512,
 	}
 	for _, alg := range algs {
-		raw := []byte(`{"alg":"` + alg + `"}`)
-		got := algFromBytes(raw, jwtKeyAlg)
-		if got != alg {
-			t.Fatalf("algFromBytes(%s) = %q", alg, got)
+		raw := []byte(`"` + alg + `"`)
+		if got := decodeAlg(raw); got != alg {
+			t.Fatalf("decodeAlg(%s) = %q", alg, got)
 		}
 	}
-	// Unknown algorithm falls back to string conversion.
-	raw := []byte(`{"alg":"EdDSA"}`)
-	if got := algFromBytes(raw, jwtKeyAlg); got != "EdDSA" {
+	if got := decodeAlg([]byte(`"EdDSA"`)); got != "EdDSA" {
 		t.Fatalf("unknown alg = %q", got)
-	}
-	// Missing key.
-	if got := algFromBytes([]byte(`{}`), jwtKeyAlg); got != "" {
-		t.Fatalf("missing key = %q", got)
 	}
 }
 
@@ -976,7 +977,7 @@ func TestHashJWT_Unsupported(t *testing.T) {
 }
 
 func TestHashJWT_AllSupported(t *testing.T) {
-	algs := []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"}
+	algs := []string{algRS256, algRS384, algRS512, algPS256, algPS384, algPS512, algES256, algES384, algES512}
 	for _, alg := range algs {
 		var buf [64]byte
 		if _, _, err := hashJWT(alg, []byte("input"), buf[:]); err != nil {
@@ -986,16 +987,16 @@ func TestHashJWT_AllSupported(t *testing.T) {
 }
 
 func TestFindKey_NoKidFallback(t *testing.T) {
-	keys := map[string]jwkPublicKey{"k1": {key: "dummy", alg: "RS256"}}
-	key, ok := findKey(keys, "", "RS256")
-	if !ok || key != "dummy" {
+	keys := map[string]jwkPublicKey{"k1": {key: testDummy, alg: algRS256}}
+	key, ok := findKey(keys, "", algRS256)
+	if !ok || key != testDummy {
 		t.Fatalf("findKey fallback: ok=%v, key=%v", ok, key)
 	}
 }
 
 func TestFindKey_WrongAlg(t *testing.T) {
-	keys := map[string]jwkPublicKey{"k1": {key: "dummy", alg: "ES256"}}
-	_, ok := findKey(keys, "k1", "RS256")
+	keys := map[string]jwkPublicKey{"k1": {key: testDummy, alg: algES256}}
+	_, ok := findKey(keys, "k1", algRS256)
 	if ok {
 		t.Fatal("expected no match for wrong alg")
 	}
@@ -1011,18 +1012,16 @@ func TestVerifyRSASignature_PSS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SignPSS: %v", err)
 	}
-	if err := verifyRSASignature("PS256", &key.PublicKey, crypto.SHA256, digest[:], sig); err != nil {
+	if err := verifyRSASignature(algPS256, &key.PublicKey, crypto.SHA256, digest[:], sig); err != nil {
 		t.Fatalf("PS256 verify: %v", err)
 	}
 }
 
 func TestVerifyJWKS_UnsupportedPublicKeyType(t *testing.T) {
-	a := &oauthAuthenticator{
-		keys:       map[string]jwkPublicKey{"bad": {key: "not-a-public-key", alg: "RS256"}},
-		keysExpiry: time.Now().Add(5 * time.Minute),
-	}
+	a := &oauthAuthenticator{}
+	a.seedKeysForTest(map[string]jwkPublicKey{"bad": {key: "not-a-public-key", alg: algRS256}})
 
-	err := a.verifyJWKS(context.Background(), "RS256", "bad", []byte("h.p"), []byte("sig"), make([]byte, 64))
+	err := a.verifyJWKS(context.Background(), algRS256, "bad", []byte("h.p"), []byte("sig"), make([]byte, 64))
 	if err == nil || !strings.Contains(err.Error(), "unsupported JWT public key type") {
 		t.Fatalf("expected unsupported key type error, got %v", err)
 	}
@@ -1033,11 +1032,9 @@ func TestVerifyJWKS_HashJWTError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
-	a := &oauthAuthenticator{
-		keys:       map[string]jwkPublicKey{"kid": {key: &key.PublicKey, alg: ""}},
-		keysExpiry: time.Now().Add(5 * time.Minute),
-	}
-	err = a.verifyJWKS(context.Background(), "XX999", "kid", []byte("h.p"), []byte("sig"), make([]byte, 64))
+	a := &oauthAuthenticator{}
+	a.seedKeysForTest(map[string]jwkPublicKey{testClaimKid: {key: &key.PublicKey, alg: ""}})
+	err = a.verifyJWKS(context.Background(), "XX999", testClaimKid, []byte("h.p"), []byte("sig"), make([]byte, 64))
 	if err == nil || !strings.Contains(err.Error(), "unsupported JWT algorithm") {
 		t.Fatalf("expected unsupported alg error, got %v", err)
 	}
@@ -1048,42 +1045,46 @@ func TestVerifyJWKS_ECVerifyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate EC key: %v", err)
 	}
-	a := &oauthAuthenticator{
-		keys:       map[string]jwkPublicKey{"ec-kid": {key: &ecKey.PublicKey, alg: "ES256"}},
-		keysExpiry: time.Now().Add(5 * time.Minute),
-	}
-	err = a.verifyJWKS(context.Background(), "ES256", "ec-kid", []byte("h.p"), []byte("bad-sig"), make([]byte, 64))
+	a := &oauthAuthenticator{}
+	a.seedKeysForTest(map[string]jwkPublicKey{"ec-kid": {key: &ecKey.PublicKey, alg: algES256}})
+	err = a.verifyJWKS(context.Background(), algES256, "ec-kid", []byte("h.p"), []byte("bad-sig"), make([]byte, 64))
 	if err == nil || !strings.Contains(err.Error(), "invalid JWT signature") {
 		t.Fatalf("expected signature verify error, got %v", err)
 	}
 }
 
 func TestParseRSAKey_InvalidN(t *testing.T) {
-	if _, err := parseRSAKey(&jwk{N: "!!!", E: "AQAB"}); err == nil {
+	if _, err := parseRSAKey("!!!", "AQAB"); err == nil {
 		t.Fatal("expected error for invalid N")
 	}
 }
 
 func TestParseRSAKey_InvalidE(t *testing.T) {
-	if _, err := parseRSAKey(&jwk{N: "AQAB", E: "!!!"}); err == nil {
+	if _, err := parseRSAKey("AQAB", "!!!"); err == nil {
 		t.Fatal("expected error for invalid E")
 	}
 }
 
+func TestParseRSAKey_WeakExponent(t *testing.T) {
+	if _, err := parseRSAKey("AQAB", "AQ"); err == nil {
+		t.Fatal("expected weak-exponent rejection")
+	}
+}
+
 func TestParseECKey_InvalidCurve(t *testing.T) {
-	if _, err := parseECKey(&jwk{Crv: "P-999", X: "AQAB", Y: "AQAB"}); err == nil {
+	if _, err := parseECKey("P-999", "AQAB", "AQAB"); err == nil {
 		t.Fatal("expected error for invalid curve")
 	}
 }
 
 func TestParseECKey_InvalidX(t *testing.T) {
-	if _, err := parseECKey(&jwk{Crv: "P-256", X: "!!!", Y: "AQAB"}); err == nil {
+	if _, err := parseECKey("P-256", "!!!", "AQAB"); err == nil {
 		t.Fatal("expected error for invalid X")
 	}
 }
 
 func TestParseECKey_InvalidY(t *testing.T) {
-	if _, err := parseECKey(&jwk{Crv: "P-256", X: "AQAB", Y: "!!!"}); err == nil {
+	if _, err := parseECKey("P-256", "AQAB", "!!!"); err == nil {
 		t.Fatal("expected error for invalid Y")
 	}
 }
@@ -1095,27 +1096,27 @@ func TestDecodeBase64Int_Invalid(t *testing.T) {
 }
 
 func TestParseJWTHeaderDirect_LargePayload(t *testing.T) {
-	hdr := map[string]any{"alg": "RS256", "kid": "big", "extra": strings.Repeat("x", 200)}
+	hdr := map[string]any{testClaimAlg: algRS256, testClaimKid: "big", "extra": strings.Repeat("x", 200)}
 	hdrJSON, mErr := json.Marshal(hdr)
 	if mErr != nil {
 		t.Fatalf("marshal: %v", mErr)
 	}
 	encoded := []byte(base64.RawURLEncoding.EncodeToString(hdrJSON))
-	h, err := parseJWTHeaderDirect(encoded)
+	h, err := parseJWTHeader(encoded)
 	if err != nil {
-		t.Fatalf("parseJWTHeaderDirect: %v", err)
+		t.Fatalf("parseJWTHeader: %v", err)
 	}
-	if h.Alg != "RS256" {
+	if h.Alg != algRS256 {
 		t.Fatalf("expected RS256, got %q", h.Alg)
 	}
 }
 
 func TestValidateToken_ExtraDotInSignature(t *testing.T) {
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer header.payload.sig.extra")
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected error for extra dot")
@@ -1126,15 +1127,15 @@ func TestValidateToken_InvalidClaimsJSON(t *testing.T) {
 	invalidJSON := base64.RawURLEncoding.EncodeToString([]byte("{not json"))
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	signingInput := header + "." + invalidJSON
-	mac := hmac.New(sha256.New, []byte("secret"))
+	mac := hmac.New(sha256.New, []byte(testSecret))
 	_, _ = mac.Write([]byte(signingInput))
 	token := signingInput + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected error for invalid claims JSON")
@@ -1148,9 +1149,8 @@ func TestRefreshKeys_DoubleCheck(t *testing.T) {
 	}
 	a := &oauthAuthenticator{
 		httpClient: http.DefaultClient,
-		keys:       map[string]jwkPublicKey{"kid": {key: &key.PublicKey, alg: "RS256"}},
-		keysExpiry: time.Now().Add(5 * time.Minute),
 	}
+	a.seedKeysForTest(map[string]jwkPublicKey{testClaimKid: {key: &key.PublicKey, alg: algRS256}})
 	keys, err := a.refreshKeys(context.Background())
 	if err != nil {
 		t.Fatalf("refreshKeys: %v", err)
@@ -1173,7 +1173,7 @@ func TestRefreshKeys_Non200(t *testing.T) {
 
 func TestRefreshKeys_JSONDecodeError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", testTypeJSON)
 		if _, fErr := fmt.Fprint(w, "not json{{{"); fErr != nil {
 			t.Errorf("fprint: %v", fErr)
 		}
@@ -1226,8 +1226,8 @@ func TestRefreshKeys_OIDCDiscovery(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		if encErr := json.NewEncoder(w).Encode(map[string]any{
-			"issuer":   "https://issuer.example.com",
-			"jwks_uri": "http://" + r.Host + "/jwks",
+			testIssuerField:  testIssuerURL,
+			testJWKSURIField: "http://" + r.Host + "/jwks",
 		}); encErr != nil {
 			t.Errorf("encode: %v", encErr)
 		}
@@ -1268,9 +1268,8 @@ func TestCurrentKeys_CacheHit(t *testing.T) {
 	}
 	a := &oauthAuthenticator{
 		httpClient: http.DefaultClient,
-		keys:       map[string]jwkPublicKey{"kid": {key: &key.PublicKey, alg: "RS256"}},
-		keysExpiry: time.Now().Add(5 * time.Minute),
 	}
+	a.seedKeysForTest(map[string]jwkPublicKey{testClaimKid: {key: &key.PublicKey, alg: algRS256}})
 	keys, err := a.currentKeys(context.Background())
 	if err != nil {
 		t.Fatalf("currentKeys: %v", err)
@@ -1281,26 +1280,44 @@ func TestCurrentKeys_CacheHit(t *testing.T) {
 }
 
 func TestParseJWKS_NamelessKey(t *testing.T) {
-	set := jwkSet{Keys: []jwk{{
-		Kty: "RSA", Kid: "", Alg: "RS256",
-		N: base64.RawURLEncoding.EncodeToString(big.NewInt(12345).Bytes()),
-		E: base64.RawURLEncoding.EncodeToString(big.NewInt(65537).Bytes()),
-	}}}
-	keys, err := parseJWKS(set)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		t.Fatalf("parseJWKS: %v", err)
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	set := jwkSet{Keys: []jwk{{
+		Kty: jwkTypeRSA, Kid: "", Alg: algRS256,
+		N: base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+		E: base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+	}}}
+	data, err := json.Marshal(set)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	keys, err := parseJWKSBytes(data)
+	if err != nil {
+		t.Fatalf("parseJWKSBytes: %v", err)
 	}
 	if _, ok := keys["key-0"]; !ok {
 		t.Fatalf("expected key 'key-0', got keys %v", keys)
 	}
 }
 
+func TestParseRSAKey_RejectsWeakModulus(t *testing.T) {
+	if _, err := parseRSAKey("AQAB", "AQAB"); !errors.Is(err, errRSAModulusWeak) {
+		t.Fatalf("expected errRSAModulusWeak, got %v", err)
+	}
+}
+
 func TestParseJWKS_InnerJWKError(t *testing.T) {
 	set := jwkSet{Keys: []jwk{
-		{Kty: "RSA", Kid: "ok", N: "AQAB", E: "AQAB"},
+		{Kty: jwkTypeRSA, Kid: "ok", N: "AQAB", E: "AQAB"},
 		{Kty: "UNKNOWN", Kid: "bad"},
 	}}
-	if _, err := parseJWKS(set); err == nil {
+	data, err := json.Marshal(set)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := parseJWKSBytes(data); err == nil {
 		t.Fatal("expected error from bad JWK")
 	}
 }
@@ -1313,24 +1330,20 @@ func TestLookupKey_RefreshFailsAfterCacheMiss(t *testing.T) {
 	a := &oauthAuthenticator{
 		httpClient: srv.Client(),
 		jwksURL:    srv.URL,
-		keys:       map[string]jwkPublicKey{"kid": {key: "dummy", alg: "ES256"}},
-		keysExpiry: time.Now().Add(5 * time.Minute),
 	}
-	if _, err := a.lookupKey(context.Background(), "kid", "RS256"); err == nil {
+	a.seedKeysForTest(map[string]jwkPublicKey{testClaimKid: {key: testDummy, alg: algES256}})
+	if _, err := a.lookupKey(context.Background(), testClaimKid, algRS256); err == nil {
 		t.Fatal("expected lookup error after refresh failure")
 	}
 }
 
 func TestParseJWK_UnsupportedKty(t *testing.T) {
-	if _, err := parseJWK(&jwk{Kty: "OKP"}); err == nil {
+	if _, _, _, err := parseJWKObject([]byte(`{"kty":"OKP","kid":"x"}`), 0); err == nil {
 		t.Fatal("expected error for unsupported key type")
 	}
 }
 
-// ── OIDC full integration test ───────────────────────────────
-
 func TestOAuth_OIDC_AutoDiscovery(t *testing.T) {
-	// Full end-to-end: issuer only, no JWKS URL → OIDC discovery → JWKS fetch → token validation.
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
@@ -1340,8 +1353,8 @@ func TestOAuth_OIDC_AutoDiscovery(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		if encErr := json.NewEncoder(w).Encode(map[string]any{
-			"issuer":   "https://issuer.example.com",
-			"jwks_uri": "http://" + r.Host + "/jwks",
+			testIssuerField:  testIssuerURL,
+			testJWKSURIField: "http://" + r.Host + "/jwks",
 		}); encErr != nil {
 			t.Errorf("encode: %v", encErr)
 		}
@@ -1350,51 +1363,25 @@ func TestOAuth_OIDC_AutoDiscovery(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	now := time.Now()
-	token := signRSAToken(t, key, kid, map[string]any{
-		"sub": "oidc-user", "iss": "https://issuer.example.com",
-		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
-	})
-
-	a, err := New(&Config{
-		Mode:        ModeOAuth,
-		OAuthIssuer: "https://issuer.example.com",
-	}, srv.Client())
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL}, srv.Client())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-
-	// Override issuer URL for test server (the authenticator uses issuer for OIDC discovery).
 	oa, ok := a.(*oauthAuthenticator)
 	if !ok {
 		t.Fatal("expected *oauthAuthenticator")
 	}
-	oa.issuer = srv.URL
-	// Keep the expected issuer for claim validation.
-	origIssuer := "https://issuer.example.com"
-	_ = origIssuer
-
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	// The token's issuer claim is "https://issuer.example.com" but the authenticator
-	// validates against its own issuer field. We need them to match for validation.
-	oa.issuer = "https://issuer.example.com"
-
-	// Force the JWKS URL to resolve through OIDC discovery via the test server.
-	// We set jwksURL empty so refreshKeys triggers OIDC discovery.
 	oa.jwksURL = ""
-	// Point to the test server for OIDC discovery.
 	oa.issuer = srv.URL
 
-	// Create a token with srv.URL as issuer so it matches.
-	token2 := signRSAToken(t, key, kid, map[string]any{
-		"sub": "oidc-user", "iss": srv.URL,
-		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+	now := time.Now()
+	token := signRSAToken(t, key, kid, map[string]any{
+		testClaimSub: "oidc-user", testClaimIss: srv.URL,
+		testClaimExp: now.Add(time.Hour).Unix(), testClaimIat: now.Unix(),
 	})
-	req2 := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req2.Header.Set("Authorization", "Bearer "+token2)
-	id, err := a.Authenticate(req2)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	id, err := a.Authenticate(req)
 	if err != nil {
 		t.Fatalf("Authenticate via OIDC discovery: %v", err)
 	}
@@ -1404,12 +1391,12 @@ func TestOAuth_OIDC_AutoDiscovery(t *testing.T) {
 }
 
 func TestValidateToken_OversizedToken(t *testing.T) {
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	oversized := "Bearer " + strings.Repeat("A", maxJWTSize+1)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", oversized)
 	_, err = a.Authenticate(req)
 	if err == nil {
@@ -1419,45 +1406,45 @@ func TestValidateToken_OversizedToken(t *testing.T) {
 
 func TestOAuth_ScopeFromSCPArray(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user-1", "iss": "https://issuer.example.com",
-			"scp": []string{"read", "write"},
-			"exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(),
+			testClaimSub: testUser1, testClaimIss: testIssuerURL,
+			"scp":        []string{testRead, testWrite},
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
+			testClaimIat: time.Now().Unix(),
 		},
-		"secret",
+		testSecret,
 	)
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	id, err := a.Authenticate(req)
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.Scopes != "read write" {
-		t.Fatalf("Scopes = %q, want %q", id.Scopes, "read write")
+	if got := strings.Join(id.Scopes, " "); got != testReadW {
+		t.Fatalf("Scopes = %q, want %q", got, testReadW)
 	}
 }
 
 func TestOAuth_NoSubjectNoScopes(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"iss": "https://issuer.example.com",
-			"exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(),
+			testClaimIss: testIssuerURL,
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
+			testClaimIat: time.Now().Unix(),
 		},
-		"secret",
+		testSecret,
 	)
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	id, err := a.Authenticate(req)
 	if err != nil {
@@ -1466,13 +1453,13 @@ func TestOAuth_NoSubjectNoScopes(t *testing.T) {
 	if id.Subject != "" {
 		t.Fatalf("Subject = %q, want empty", id.Subject)
 	}
-	if id.Scopes != "" {
-		t.Fatalf("Scopes = %q, want empty", id.Scopes)
+	if len(id.Scopes) != 0 {
+		t.Fatalf("Scopes = %v, want empty", id.Scopes)
 	}
 }
 
 func TestBearerToken_WrongScheme(t *testing.T) {
-	_, ok := bearerToken("Xearer my-token")
+	_, ok := parseAuthScheme("Xearer my-token", "bearer")
 	if ok {
 		t.Fatal("expected false for wrong scheme")
 	}
@@ -1485,98 +1472,59 @@ func TestApiKeyToken(t *testing.T) {
 		want   string
 		ok     bool
 	}{
-		{"valid", "ApiKey my-key", "my-key", true},
-		{"valid_lowercase", "apikey my-key", "my-key", true},
-		{"valid_uppercase", "APIKEY my-key", "my-key", true},
+		{"valid", "ApiKey my-key", testMyKey, true},
+		{"valid_lowercase", "apikey my-key", testMyKey, true},
+		{"valid_uppercase", "APIKEY my-key", testMyKey, true},
 		{"too_short", "Api", "", false},
 		{"no_space", "ApiKeyX", "", false},
 		{"wrong_scheme", "NotKey token", "", false},
-		{"empty", "", "", false},
+		{testEmpty, "", "", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := apiKeyToken(tc.header)
+			got, ok := parseAuthScheme(tc.header, "apikey")
 			if ok != tc.ok || got != tc.want {
-				t.Fatalf("apiKeyToken(%q) = (%q, %v), want (%q, %v)", tc.header, got, ok, tc.want, tc.ok)
+				t.Fatalf("parseAuthScheme(%q, %q) = (%q, %v), want (%q, %v)", tc.header, "apikey", got, ok, tc.want, tc.ok)
 			}
 		})
 	}
 }
 
-func TestContainsScope_EmptyScopes(t *testing.T) {
-	if containsScope("", "read") {
-		t.Fatal("expected false for empty scopes")
-	}
-}
-
 func TestParseJWTHeaderDirect_WhitespaceJSON(t *testing.T) {
-	// Header with spaces around colon — algFromBytes won't match, falls back to parseJWTHeaderSlow.
 	raw := []byte(`{"alg" : "HS256", "typ":"JWT"}`)
 	encoded := base64.RawURLEncoding.EncodeToString(raw)
-	h, err := parseJWTHeaderDirect([]byte(encoded))
+	h, err := parseJWTHeader([]byte(encoded))
 	if err != nil {
-		t.Fatalf("parseJWTHeaderDirect: %v", err)
+		t.Fatalf("parseJWTHeader: %v", err)
 	}
-	if h.Alg != "HS256" {
-		t.Fatalf("Alg = %q, want %q", h.Alg, "HS256")
+	if h.Alg != algHS256 {
+		t.Fatalf("Alg = %q, want %q", h.Alg, algHS256)
 	}
 }
 
-func TestParseJWTHeaderSlow_InvalidBase64(t *testing.T) {
-	// Create encoded data that decodes to >128 bytes (forces slow path)
-	// but is invalid base64.
+func TestParseJWTHeaderHeap_InvalidBase64(t *testing.T) {
 	large := strings.Repeat("A", 200) + "!!!"
-	_, err := parseJWTHeaderSlow([]byte(large))
-	if err == nil {
+	if _, err := parseJWTHeader([]byte(large)); err == nil {
 		t.Fatal("expected error for invalid base64")
 	}
 }
 
-func TestParseJWTHeaderSlow_InvalidJSON(t *testing.T) {
+func TestParseJWTHeaderHeap_InvalidJSON(t *testing.T) {
 	raw := make([]byte, 200)
 	for i := range raw {
 		raw[i] = 'x'
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(raw)
-	_, err := parseJWTHeaderSlow([]byte(encoded))
-	if err == nil {
+	if _, err := parseJWTHeader([]byte(encoded)); err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
 }
 
-func TestAlgFromBytes_Truncated(t *testing.T) {
-	// Key "alg":" at end of data with no value after.
-	alg := algFromBytes([]byte(`{"alg":"`), jwtKeyAlg)
-	if alg != "" {
-		t.Fatalf("algFromBytes truncated = %q, want empty", alg)
-	}
-}
-
-func TestAlgFromBytes_NoClosingQuote(t *testing.T) {
-	alg := algFromBytes([]byte(`{"alg":"RS256`), jwtKeyAlg)
-	if alg != "" {
-		t.Fatalf("algFromBytes no closing quote = %q, want empty", alg)
-	}
-}
-
-func TestJsonStringValue_Truncated(t *testing.T) {
-	v := jsonStringValue([]byte(`{"kid":"`), jwtKeyKid)
-	if v != "" {
-		t.Fatalf("jsonStringValue truncated = %q, want empty", v)
-	}
-}
-
-func TestJsonStringValue_NoClosingQuote(t *testing.T) {
-	v := jsonStringValue([]byte(`{"kid":"test`), jwtKeyKid)
-	if v != "" {
-		t.Fatalf("jsonStringValue no closing quote = %q, want empty", v)
-	}
-}
-
-func TestJsonStringValue_WithEscape(t *testing.T) {
-	v := jsonStringValue([]byte(`{"kid":"test\\kid"}`), jwtKeyKid)
-	if v != "" {
-		t.Fatalf("jsonStringValue with escape = %q, want empty", v)
+func TestDecodeAlg_TruncatedHeader(t *testing.T) {
+	// Truncated quote – jsonfast.FindField cannot locate the value, so we
+	// must report empty.
+	if got := decodeAlg([]byte(`"RS256`)); got == algRS256 {
+		t.Fatalf("expected fallback empty/literal, got %q", got)
 	}
 }
 
@@ -1587,15 +1535,15 @@ func TestValidateToken_InvalidBase64Payload(t *testing.T) {
 	header := enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	invalidPayload := "!!!"
 	signingInput := header + "." + invalidPayload
-	mac := hmac.New(sha256.New, []byte("secret"))
+	mac := hmac.New(sha256.New, []byte(testSecret))
 	_, _ = mac.Write([]byte(signingInput))
 	token := signingInput + "." + enc.EncodeToString(mac.Sum(nil))
 
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if _, authErr := a.Authenticate(req); authErr == nil {
 		t.Fatal("expected error for invalid base64 payload")
@@ -1604,28 +1552,28 @@ func TestValidateToken_InvalidBase64Payload(t *testing.T) {
 
 func TestOAuth_ScopeFromSCPArray_EmptyElements(t *testing.T) {
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"sub": "user-1",
-			"iss": "https://issuer.example.com",
-			"exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(),
-			"scp": []string{"read", "", "write"},
+			testClaimSub: testUser1,
+			testClaimIss: testIssuerURL,
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
+			testClaimIat: time.Now().Unix(),
+			"scp":        []string{testRead, "", testWrite},
 		},
-		"secret",
+		testSecret,
 	)
-	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: "https://issuer.example.com", OAuthHMACSecret: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthHMACSecret: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	id, authErr := a.Authenticate(req)
 	if authErr != nil {
 		t.Fatalf("Authenticate: %v", authErr)
 	}
-	if id.Scopes != "read write" {
-		t.Fatalf("Scopes = %q, want %q", id.Scopes, "read write")
+	if got := strings.Join(id.Scopes, " "); got != testReadW {
+		t.Fatalf("Scopes = %q, want %q", got, testReadW)
 	}
 }
 
@@ -1645,7 +1593,7 @@ func (t *closeErrTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: t.statusCode,
 		Body:       &closeErrBody{Reader: strings.NewReader(t.body)},
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Header:     http.Header{"Content-Type": []string{testTypeJSON}},
 	}, nil
 }
 
@@ -1657,7 +1605,7 @@ func TestFetchAndParseJWKS_CloseError(t *testing.T) {
 			statusCode: http.StatusOK,
 		}},
 	}
-	_, err := a.fetchAndParseJWKS(context.Background())
+	_, err := a.fetchAndParseJWKS(context.Background(), a.jwksURL)
 	if err == nil {
 		t.Fatal("expected error from Body.Close")
 	}
@@ -1666,8 +1614,6 @@ func TestFetchAndParseJWKS_CloseError(t *testing.T) {
 	}
 }
 
-// ── bearerToken ──────────────────────────────────────────────
-
 func TestBearerToken(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1675,30 +1621,28 @@ func TestBearerToken(t *testing.T) {
 		want   string
 		ok     bool
 	}{
-		{"valid", "Bearer mytoken", "mytoken", true},
-		{"valid lowercase", "bearer mytoken", "mytoken", true},
-		{"valid uppercase", "BEARER mytoken", "mytoken", true},
-		{"valid mixed case", "BeArEr mytoken", "mytoken", true},
-		{"empty", "", "", false},
-		{"bearer only no space", "Bearer", "", false},         // len==6, <= 7
+		{"valid", "Bearer mytoken", testMyTok, true},
+		{"valid lowercase", "bearer mytoken", testMyTok, true},
+		{"valid uppercase", "BEARER mytoken", testMyTok, true},
+		{"valid mixed case", "BeArEr mytoken", testMyTok, true},
+		{testEmpty, "", "", false},
+		{"bearer only no space", schemeBearer, "", false},     // len==6, <= 7
 		{"bearer plus 1 char no space", "BearerX", "", false}, // len==7, <= 7
 		{"wrong scheme", "Basic token", "", false},
 		{"almost bearer", "Xearer mytoken", "", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := bearerToken(tc.header)
+			got, ok := parseAuthScheme(tc.header, "bearer")
 			if ok != tc.ok {
-				t.Fatalf("bearerToken(%q) ok=%v, want %v", tc.header, ok, tc.ok)
+				t.Fatalf("parseAuthScheme(%q, %q) ok=%v, want %v", tc.header, "bearer", ok, tc.ok)
 			}
 			if ok && got != tc.want {
-				t.Fatalf("bearerToken(%q) = %q, want %q", tc.header, got, tc.want)
+				t.Fatalf("parseAuthScheme(%q, %q) = %q, want %q", tc.header, "bearer", got, tc.want)
 			}
 		})
 	}
 }
-
-// ── splitJWT ─────────────────────────────────────────────────
 
 // TestSplitJWT_Valid covers the happy paths of splitJWT.
 func TestSplitJWT_Valid(t *testing.T) {
@@ -1722,7 +1666,7 @@ func TestSplitJWT_Invalid(t *testing.T) {
 		{"no dots", "aaabbbccc"},
 		{"one dot", "aaa.bbb"},
 		{"four segments", "a.b.c.d"},
-		{"empty", ""},
+		{testEmpty, ""},
 	}
 	for _, tc := range invalid {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1734,64 +1678,84 @@ func TestSplitJWT_Invalid(t *testing.T) {
 	}
 }
 
-// ── containsScope ────────────────────────────────────────────
-
-func TestContainsScope(t *testing.T) {
-	tests := []struct {
-		scopes string
-		scope  string
-		want   bool
-	}{
-		{"read write admin", "read", true},
-		{"read write admin", "write", true},
-		{"read write admin", "admin", true}, // last element
-		{"read", "read", true},              // single scope
-		{"read write", "admin", false},      // not present
-		{"readonly", "read", false},         // prefix of another scope
-		{"read write", "readonly", false},   // not a scope, only prefix of
-		{"read write", "r", false},          // partial match
-		{"", "read", false},                 // empty scopes
+// BenchmarkOAuthHMAC_HS256 measures the JWT HMAC validation hot path.
+func BenchmarkOAuthHMAC_HS256(b *testing.B) {
+	const issuer = testIssuerURL
+	const secret = "bench-secret-key"
+	now := time.Now()
+	token := signHS256Token(b,
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
+		map[string]any{
+			testClaimSub: "bench-user",
+			testClaimIss: issuer,
+			testClaimAud: "bench",
+			"scope":      testReadW,
+			testClaimIat: now.Unix(),
+			"nbf":        now.Add(-time.Minute).Unix(),
+			testClaimExp: now.Add(time.Hour).Unix(),
+		},
+		secret,
+	)
+	auth, err := New(&Config{
+		Mode:            ModeOAuth,
+		OAuthIssuer:     issuer,
+		OAuthAudience:   "bench",
+		OAuthHMACSecret: secret,
+	}, nil)
+	if err != nil {
+		b.Fatalf("New: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.scopes+"/"+tc.scope, func(t *testing.T) {
-			got := containsScope(tc.scopes, tc.scope)
-			if got != tc.want {
-				t.Fatalf("containsScope(%q, %q) = %v, want %v", tc.scopes, tc.scope, got, tc.want)
-			}
-		})
+	req := newReq(b, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := auth.Authenticate(req); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
-// ── hasRequiredScopes ────────────────────────────────────────
+// BenchmarkHasRequiredScopes measures the slice-based scope check.
+func BenchmarkHasRequiredScopes(b *testing.B) {
+	have := []string{testAdmin, testScopeMCPRead, "mcp:write", testRead, testWrite}
+	required := []string{testScopeMCPRead, testRead}
+	b.ReportAllocs()
 
+	for b.Loop() {
+		if !hasRequiredScopes(have, required) {
+			b.Fatal("unexpected false")
+		}
+	}
+}
+
+// hasRequiredScopes operates on []string after the scope split.
 func TestHasRequiredScopes(t *testing.T) {
-	if !hasRequiredScopes("read write", nil) {
+	if !hasRequiredScopes([]string{testRead, testWrite}, nil) {
 		t.Error("nil required → always true")
 	}
-	if !hasRequiredScopes("", nil) {
+	if !hasRequiredScopes(nil, nil) {
 		t.Error("empty have + nil required → true")
 	}
-	if !hasRequiredScopes("read write", []string{}) {
+	if !hasRequiredScopes([]string{testRead, testWrite}, []string{}) {
 		t.Error("empty required slice → true")
 	}
-	if hasRequiredScopes("", []string{"read"}) {
+	if hasRequiredScopes(nil, []string{testRead}) {
 		t.Error("empty have + non-empty required → false")
 	}
-	if !hasRequiredScopes("read write admin", []string{"read", "admin"}) {
+	if !hasRequiredScopes([]string{testRead, testWrite, testAdmin}, []string{testRead, testAdmin}) {
 		t.Error("all required present → true")
 	}
-	if hasRequiredScopes("read write", []string{"read", "admin"}) {
+	if hasRequiredScopes([]string{testRead, testWrite}, []string{testRead, testAdmin}) {
 		t.Error("some required missing → false")
 	}
-	if !hasRequiredScopes("read", []string{"read"}) {
+	if !hasRequiredScopes([]string{testRead}, []string{testRead}) {
 		t.Error("single required, present → true")
 	}
-	if hasRequiredScopes("readonly", []string{"read"}) {
+	if hasRequiredScopes([]string{"readonly"}, []string{testRead}) {
 		t.Error("scope is prefix of have but not exact match → false")
 	}
 }
-
-// ── claimStringView ──────────────────────────────────────────
 
 func TestClaimStringView(t *testing.T) {
 	// Valid quoted string.
@@ -1820,60 +1784,89 @@ func TestClaimStringView(t *testing.T) {
 	}
 }
 
-// ── scopesFromClaims priority ────────────────────────────────
-
-func TestScopesFromClaims_Priorities(t *testing.T) {
-	// "scope" string beats "scp".
+// detachScopes priorities: scope > scp string > scp array.
+func TestDetachScopes_Priorities(t *testing.T) {
 	c1 := jwtClaims{scope: []byte(`"read admin"`), scp: []byte(`"write"`)}
-	if got := scopesFromClaims(&c1); got != "read admin" {
+	if got := strings.Join(detachScopes(&c1), " "); got != "read admin" {
 		t.Fatalf("scope priority: got %q, want %q", got, "read admin")
 	}
 
-	// "scp" string when "scope" absent.
 	c2 := jwtClaims{scp: []byte(`"read write"`)}
-	if got := scopesFromClaims(&c2); got != "read write" {
-		t.Fatalf("scp string: got %q, want %q", got, "read write")
+	if got := strings.Join(detachScopes(&c2), " "); got != testReadW {
+		t.Fatalf("scp string: got %q, want %q", got, testReadW)
 	}
 
-	// "scp" array when both scope and scp-string absent.
 	c3 := jwtClaims{scp: []byte(`["read","write"]`)}
-	if got := scopesFromClaims(&c3); got != "read write" {
-		t.Fatalf("scp array: got %q, want %q", got, "read write")
+	if got := strings.Join(detachScopes(&c3), " "); got != testReadW {
+		t.Fatalf("scp array: got %q, want %q", got, testReadW)
 	}
 
-	// No scopes at all.
-	if got := scopesFromClaims(&jwtClaims{}); got != "" {
-		t.Fatalf("no scopes: got %q, want empty", got)
+	if got := detachScopes(&jwtClaims{}); len(got) != 0 {
+		t.Fatalf("no scopes: got %v, want empty", got)
 	}
 }
 
-// ── OAuthIssuer trailing slash in config ─────────────────────
-
 func TestOAuth_IssuerTrailingSlashInConfig(t *testing.T) {
 	// JWT issued with canonical URL (no trailing slash).
-	// Config has trailing slash — normalizeConfig must strip it.
-	const issuer = "https://issuer.example.com"
+	// Config has trailing slash — normaliseConfig must strip it.
+	const issuer = testIssuerURL
 	token := signHS256Token(t,
-		map[string]any{"alg": "HS256", "typ": "JWT"},
+		map[string]any{testClaimAlg: algHS256, testClaimTyp: testHeaderJWT},
 		map[string]any{
-			"iss": issuer,
-			"sub": "u1",
-			"exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(),
+			testClaimIss: issuer,
+			testClaimSub: "u1",
+			testClaimExp: time.Now().Add(time.Hour).Unix(),
+			testClaimIat: time.Now().Unix(),
 		},
-		"secret",
+		testSecret,
 	)
 	auth, err := New(&Config{
 		Mode:            ModeOAuth,
 		OAuthIssuer:     issuer + "/", // trailing slash in config
-		OAuthHMACSecret: "secret",
+		OAuthHMACSecret: testSecret,
 	}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	r := newReq(t, http.MethodGet, "/", http.NoBody)
 	r.Header.Set("Authorization", "Bearer "+token)
 	if _, authErr := auth.Authenticate(r); authErr != nil {
 		t.Fatalf("expected success despite trailing slash in config: %v", authErr)
+	}
+}
+
+func TestRequireHTTPS(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{name: "https public", raw: "https://example.com", wantErr: false},
+		{name: "https with port", raw: "https://example.com:8443", wantErr: false},
+		{name: "https with path", raw: "https://example.com/.well-known/jwks", wantErr: false},
+		{name: "http public reject", raw: "http://example.com", wantErr: true},
+		{name: "http with port reject", raw: "http://example.com:80", wantErr: true},
+		{name: "http localhost allow", raw: "http://localhost:8080", wantErr: false},
+		{name: "http 127.0.0.1 allow", raw: "http://127.0.0.1:9090", wantErr: false},
+		{name: "http ::1 allow", raw: "http://[::1]:8080", wantErr: false},
+		{name: "ftp reject", raw: "ftp://example.com", wantErr: true},
+		{name: "javascript reject", raw: "javascript:alert(1)", wantErr: true},
+		{name: "file reject", raw: "file:///etc/passwd", wantErr: true},
+		{name: "empty reject", raw: "", wantErr: true},
+		{name: "no scheme reject", raw: "example.com", wantErr: true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := requireHTTPS(tt.raw)
+			gotErr := err != nil
+			if gotErr != tt.wantErr {
+				t.Fatalf("requireHTTPS(%q) err = %v, wantErr = %v", tt.raw, err, tt.wantErr)
+			}
+			if gotErr && !errors.Is(err, errInsecureURLScheme) {
+				t.Fatalf("expected errInsecureURLScheme, got %v", err)
+			}
+		})
 	}
 }

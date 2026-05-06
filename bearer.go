@@ -4,22 +4,23 @@ import "net/http"
 
 var _ Authenticator = (*bearerAuthenticator)(nil)
 
-var bearerIdentity = Identity{Method: ModeBearer, Subject: "static-bearer"}
-var errInvalidBearerToken = unauthorizedError("invalid bearer token")
+var bearerIdentity = &Identity{Method: ModeBearer, Subject: "static-bearer"}
+
+var errInvalidBearerToken = unauthorisedError("invalid bearer token")
 
 type bearerAuthenticator struct {
 	realm string
-	token string // bare token without "Bearer " prefix
+	token string
 }
 
-func (a *bearerAuthenticator) Authenticate(r *http.Request) (Identity, error) {
+func (a *bearerAuthenticator) Authenticate(r *http.Request) (*Identity, error) {
 	v := r.Header["Authorization"]
 	if len(v) == 0 {
-		return Identity{}, errInvalidBearerToken
+		return nil, errInvalidBearerToken
 	}
-	token, ok := bearerToken(v[0])
+	token, ok := parseAuthScheme(v[0], "bearer")
 	if !ok || !secureEqual(token, a.token) {
-		return Identity{}, errInvalidBearerToken
+		return nil, errInvalidBearerToken
 	}
 	return bearerIdentity, nil
 }
@@ -28,6 +29,4 @@ func (a *bearerAuthenticator) Challenge(err error, resourceMetadataURL string) (
 	return challengeFromError(a.realm, err, resourceMetadataURL)
 }
 
-func (a *bearerAuthenticator) Metadata(_ string) *ProtectedResourceMetadata {
-	return nil
-}
+func (*bearerAuthenticator) Metadata(_ string) *ProtectedResourceMetadata { return nil }

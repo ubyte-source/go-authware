@@ -16,11 +16,15 @@ make all
 ## Running Tests
 
 ```bash
-make test        # All tests with race detector
+make test        # All tests
+make race        # All tests with race detector
 make bench       # Benchmarks with memory profiling
 make cover       # Coverage report
-make vet         # Static analysis
-make lint        # golangci-lint
+make vet         # go vet
+make lint        # golangci-lint (39 linters incl. gosec, 0 issues)
+make vuln        # govulncheck against module deps
+make fuzz        # All fuzz targets (FUZZTIME=30s by default)
+make ci          # Full CI pipeline (vet+lint+sec+vuln+test+cover+bench)
 ```
 
 ## Performance Constraints

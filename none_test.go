@@ -2,7 +2,6 @@ package authware
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -11,7 +10,7 @@ func TestAllowAllAuthenticator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	id, err := a.Authenticate(req)
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -26,7 +25,7 @@ func TestAllowAllAuthenticator_Challenge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	aErr := &authError{status: http.StatusUnauthorized, message: "fail", scheme: "Bearer", code: "invalid_token"}
+	aErr := &authError{status: http.StatusUnauthorized, message: testFail, scheme: "Bearer", code: "invalid_token"}
 	status, header, msg := a.Challenge(aErr, "https://example.com/.well-known/oauth-protected-resource")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("status = %d", status)
@@ -34,7 +33,7 @@ func TestAllowAllAuthenticator_Challenge(t *testing.T) {
 	if header == "" {
 		t.Fatal("expected WWW-Authenticate header for Bearer scheme")
 	}
-	if msg != "fail" {
+	if msg != testFail {
 		t.Fatalf("message = %q", msg)
 	}
 }
@@ -44,7 +43,23 @@ func TestAllowAllAuthenticator_Metadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if md := a.Metadata("https://example.com"); md != nil {
+	if md := a.Metadata(testHTTPS); md != nil {
 		t.Fatalf("expected nil metadata, got %+v", md)
+	}
+}
+
+// BenchmarkNone measures the allow-all path.
+func BenchmarkNone(b *testing.B) {
+	auth, err := New(&Config{Mode: ModeNone}, nil)
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	req := newReq(b, http.MethodGet, "/", http.NoBody)
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := auth.Authenticate(req); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

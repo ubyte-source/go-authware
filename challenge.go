@@ -6,16 +6,27 @@ import (
 	"strings"
 )
 
-func unauthorizedError(message string) error {
-	return &authError{status: http.StatusUnauthorized, code: "invalid_token", message: message, scheme: "Bearer"}
+const (
+	schemeBearer             = "Bearer"
+	errCodeInvalidToken      = "invalid_token"
+	errCodeInsufficientScope = "insufficient_scope"
+)
+
+func unauthorisedError(message string) error {
+	return &authError{
+		status:  http.StatusUnauthorized,
+		code:    errCodeInvalidToken,
+		message: message,
+		scheme:  schemeBearer,
+	}
 }
 
 func insufficientScopeError(scope []string) error {
 	return &authError{
 		status:  http.StatusForbidden,
-		code:    "insufficient_scope",
+		code:    errCodeInsufficientScope,
 		message: "missing required scope",
-		scheme:  "Bearer",
+		scheme:  schemeBearer,
 		scope:   strings.Join(scope, " "),
 	}
 }
@@ -28,12 +39,10 @@ func challengeFromError(realm string, err error, resourceMetadataURL string) (st
 	if errors.As(err, &ae) {
 		status = ae.status
 		message = ae.message
-
-		if ae.scheme == "Bearer" {
+		if ae.scheme == schemeBearer {
 			return status, bearerChallenge(realm, ae, resourceMetadataURL), message
 		}
 	}
-
 	return status, "", message
 }
 
@@ -50,25 +59,21 @@ func bearerChallenge(realm string, ae *authError, resourceMetadataURL string) st
 		escapeHeaderValue(&b, resourceMetadataURL)
 		b.WriteByte('"')
 	}
-
 	if ae.code != "" {
 		b.WriteString(`, error="`)
 		escapeHeaderValue(&b, ae.code)
 		b.WriteByte('"')
 	}
-
 	if ae.message != "" {
 		b.WriteString(`, error_description="`)
 		escapeHeaderValue(&b, ae.message)
 		b.WriteByte('"')
 	}
-
 	if ae.scope != "" {
 		b.WriteString(`, scope="`)
 		escapeHeaderValue(&b, ae.scope)
 		b.WriteByte('"')
 	}
-
 	return b.String()
 }
 

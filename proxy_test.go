@@ -23,7 +23,7 @@ func TestNewOAuthProxy_NilOnEmptyConfig(t *testing.T) {
 func TestNewOAuthProxy_NilOnMissingClientID(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
+		OAuthAuthorizationServers: []string{testHTTPS},
 	}, log)
 	if p != nil {
 		t.Fatal("expected nil when OAuthClientID is empty")
@@ -33,7 +33,7 @@ func TestNewOAuthProxy_NilOnMissingClientID(t *testing.T) {
 func TestNewOAuthProxy_NilOnMissingServers(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	p := NewOAuthProxy(&Config{
-		OAuthClientID: "client-id",
+		OAuthClientID: testClientID,
 	}, log)
 	if p != nil {
 		t.Fatal("expected nil when OAuthAuthorizationServers is empty")
@@ -43,21 +43,21 @@ func TestNewOAuthProxy_NilOnMissingServers(t *testing.T) {
 func TestNewOAuthProxy_Valid(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "client-id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testClientID,
 	}, log)
 	if p == nil {
 		t.Fatal("expected non-nil proxy")
 	}
-	if p.clientID != "client-id" {
+	if p.clientID != testClientID {
 		t.Fatalf("clientID = %q", p.clientID)
 	}
 }
 
 func TestNewOAuthProxy_NilLogger(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "client-id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testClientID,
 	}, nil)
 	if p == nil {
 		t.Fatal("expected non-nil proxy with nil logger")
@@ -69,10 +69,10 @@ func TestNewOAuthProxy_NilLogger(t *testing.T) {
 
 func TestNewOAuthProxy_CopiesRequiredScopes(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	scopes := []string{"api://app/.default", "openid"}
+	scopes := []string{"api://app/.default", testScopeOpenID}
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 		OAuthRequiredScopes:       scopes,
 	}, log)
 	// Mutate original slice — proxy should not be affected.
@@ -87,7 +87,7 @@ func TestNewOAuthProxy_CopiesServers(t *testing.T) {
 	servers := []string{"https://a.com", "https://b.com"}
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: servers,
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, log)
 	// Mutate original slice — proxy should not be affected.
 	servers[0] = "https://mutated.com"
@@ -96,27 +96,37 @@ func TestNewOAuthProxy_CopiesServers(t *testing.T) {
 	}
 }
 
-// ── ASMetadataHandler ───────────────────────────────────────
-
-func fakeUpstreamAS(t *testing.T, body string) *httptest.Server {
+// fakeUpstreamAS builds a mock OIDC AS server. body is invoked with the
+// running server URL so the metadata document can publish a self-consistent
+// issuer (the production validator binds endpoints to the issuer host).
+func fakeUpstreamAS(t *testing.T, body func(serverURL string) string) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+	srv := httptest.NewUnstartedServer(nil)
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", testTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		if _, wErr := w.Write([]byte(body)); wErr != nil {
+		if _, wErr := w.Write([]byte(body(srv.URL))); wErr != nil {
 			t.Errorf("write: %v", wErr)
 		}
-	}))
+	})
+	srv.Start()
+	return srv
 }
 
-func validUpstreamJSON() string {
+// validUpstreamJSON returns a complete AS metadata document anchored at issuer.
+func validUpstreamJSON(issuer string) string {
 	return `{` +
-		`"issuer":"https://fake-issuer.example.com",` +
-		`"authorization_endpoint":"https://fake-issuer.example.com/authorize",` +
-		`"token_endpoint":"https://fake-issuer.example.com/token",` +
+		`"issuer":"` + issuer + `",` +
+		`"authorization_endpoint":"` + issuer + `/authorize",` +
+		`"token_endpoint":"` + issuer + `/token",` +
 		`"response_types_supported":["code"],` +
 		`"code_challenge_methods_supported":["S256"]` +
 		`}`
+}
+
+// staticUpstreamBody returns a body builder that ignores the server URL.
+func staticUpstreamBody(s string) func(string) string {
+	return func(string) string { return s }
 }
 
 // assertMetaString checks that meta[key] equals want.
@@ -137,22 +147,22 @@ func assertMetaArray(t *testing.T, meta map[string]any, key, wantFirst string) {
 }
 
 func TestASMetadataHandler_Success(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "my-client",
+		OAuthClientID:             testClient,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", http.NoBody)
+	r := newReq(t, http.MethodGet, "/.well-known/oauth-authorization-server", http.NoBody)
 	p.ASMetadataHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := w.Header().Get("Content-Type"); ct != testTypeJSON {
 		t.Fatalf("Content-Type = %q", ct)
 	}
 	if cc := w.Header().Get("Cache-Control"); cc != "public, max-age=300" {
@@ -179,17 +189,17 @@ func TestASMetadataHandler_Success(t *testing.T) {
 }
 
 func TestASMetadataHandler_ScopesSupportedIncludesRequiredScopes(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 		OAuthRequiredScopes:       []string{"api://00000000-0000-0000-0000-000000000001/.default"},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -214,7 +224,7 @@ func TestASMetadataHandler_ScopesSupportedIncludesRequiredScopes(t *testing.T) {
 		}
 		found[s] = true
 	}
-	wantScopes := []string{"openid", "profile", "email", "offline_access",
+	wantScopes := []string{testScopeOpenID, "profile", "email", "offline_access",
 		"api://00000000-0000-0000-0000-000000000001/.default"}
 	for _, want := range wantScopes {
 		if !found[want] {
@@ -224,18 +234,18 @@ func TestASMetadataHandler_ScopesSupportedIncludesRequiredScopes(t *testing.T) {
 }
 
 func TestASMetadataHandler_ScopesSupportedNoDuplicates(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
-	// "openid" is already a base OIDC scope — should not be duplicated.
+	// testScopeOpenID is already a base OIDC scope — should not be duplicated.
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
-		OAuthRequiredScopes:       []string{"openid", "custom"},
+		OAuthClientID:             testID,
+		OAuthRequiredScopes:       []string{testScopeOpenID, "custom"},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	var meta map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &meta); err != nil {
@@ -251,7 +261,7 @@ func TestASMetadataHandler_ScopesSupportedNoDuplicates(t *testing.T) {
 		if !ok {
 			t.Fatalf("scopes_supported element not a string: %v", v)
 		}
-		if s == "openid" {
+		if s == testScopeOpenID {
 			count++
 		}
 	}
@@ -261,17 +271,17 @@ func TestASMetadataHandler_ScopesSupportedNoDuplicates(t *testing.T) {
 }
 
 func TestASMetadataHandler_ScopesSupportedNoExtraScopes(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	// No extra required scopes — should have just the OIDC base scopes.
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	var meta map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &meta); err != nil {
@@ -288,33 +298,37 @@ func TestASMetadataHandler_ScopesSupportedNoExtraScopes(t *testing.T) {
 }
 
 func TestASMetadataHandler_StoresUpstreamEndpoints(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
-	if p.upstreamTokenEndpoint != "https://fake-issuer.example.com/token" {
-		t.Fatalf("upstreamTokenEndpoint = %q", p.upstreamTokenEndpoint)
+	st := p.loadState()
+	if st == nil {
+		t.Fatal("upstream state nil after fetch")
 	}
-	if p.upstreamAuthzEndpoint != "https://fake-issuer.example.com/authorize" {
-		t.Fatalf("upstreamAuthzEndpoint = %q", p.upstreamAuthzEndpoint)
+	if st.tokenEndpoint != fakeAS.URL+"/token" {
+		t.Fatalf("tokenEndpoint = %q", st.tokenEndpoint)
+	}
+	if st.authzEndpoint != fakeAS.URL+"/authorize" {
+		t.Fatalf("authzEndpoint = %q", st.authzEndpoint)
 	}
 }
 
 func TestASMetadataHandler_UpstreamUnavailable(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{"http://127.0.0.1:1"}, // connection refused
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", w.Code)
@@ -322,47 +336,49 @@ func TestASMetadataHandler_UpstreamUnavailable(t *testing.T) {
 }
 
 func TestASMetadataHandler_Caching(t *testing.T) {
-	var hits int32
-	fakeAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		w.Header().Set("Content-Type", "application/json")
+	var hits atomic.Int32
+	fakeAS := httptest.NewUnstartedServer(nil)
+	fakeAS.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", testTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		if _, wErr := w.Write([]byte(validUpstreamJSON())); wErr != nil {
+		if _, wErr := w.Write([]byte(validUpstreamJSON(fakeAS.URL))); wErr != nil {
 			t.Errorf("write: %v", wErr)
 		}
-	}))
+	})
+	fakeAS.Start()
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	handler := p.ASMetadataHandler()
 	for range 5 {
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+		handler.ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d", w.Code)
 		}
 	}
 
-	if got := atomic.LoadInt32(&hits); got != 1 {
+	if got := hits.Load(); got != 1 {
 		t.Fatalf("expected 1 upstream fetch (sync.Once), got %d", got)
 	}
 }
 
 func TestASMetadataHandler_InvalidJSON(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, `not-json`)
+	fakeAS := fakeUpstreamAS(t, staticUpstreamBody(`not-json`))
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", w.Code)
@@ -372,16 +388,16 @@ func TestASMetadataHandler_InvalidJSON(t *testing.T) {
 func TestASMetadataHandler_MissingIssuer(t *testing.T) {
 	body := `{"authorization_endpoint":"https://example.com/authorize",` +
 		`"token_endpoint":"https://example.com/token"}`
-	fakeAS := fakeUpstreamAS(t, body)
+	fakeAS := fakeUpstreamAS(t, staticUpstreamBody(body))
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 for missing issuer, got %d", w.Code)
@@ -389,16 +405,17 @@ func TestASMetadataHandler_MissingIssuer(t *testing.T) {
 }
 
 func TestASMetadataHandler_MissingAuthorizationEndpoint(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, `{"issuer":"https://example.com","token_endpoint":"https://example.com/token"}`)
+	body := `{"issuer":"https://example.com","token_endpoint":"https://example.com/token"}`
+	fakeAS := fakeUpstreamAS(t, staticUpstreamBody(body))
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 for missing authorization_endpoint, got %d", w.Code)
@@ -413,11 +430,11 @@ func TestASMetadataHandler_UpstreamHTTPError(t *testing.T) {
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", w.Code)
@@ -426,56 +443,56 @@ func TestASMetadataHandler_UpstreamHTTPError(t *testing.T) {
 
 func TestASMetadataHandler_FallbackToOAuthASURL(t *testing.T) {
 	// Upstream only responds on /.well-known/oauth-authorization-server, not openid-configuration.
-	var hits int32
-	fakeAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+	var hits atomic.Int32
+	fakeAS := httptest.NewUnstartedServer(nil)
+	fakeAS.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
 		if strings.Contains(r.URL.Path, "openid-configuration") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", testTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		if _, wErr := w.Write([]byte(validUpstreamJSON())); wErr != nil {
+		if _, wErr := w.Write([]byte(validUpstreamJSON(fakeAS.URL))); wErr != nil {
 			t.Errorf("write: %v", wErr)
 		}
-	}))
+	})
+	fakeAS.Start()
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 (fallback URL), got %d", w.Code)
 	}
 	// Should have tried both URLs.
-	if got := atomic.LoadInt32(&hits); got != 2 {
+	if got := hits.Load(); got != 2 {
 		t.Fatalf("expected 2 hits (openid-config + oauth-as), got %d", got)
 	}
 }
 
 func TestASMetadataHandler_TrailingSlashTrimmed(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL + "///"},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 with trailing slashes trimmed, got %d", w.Code)
 	}
 }
-
-// ── RegisterHandler ─────────────────────────────────────────
 
 // assertMapHasKey checks that a key exists in the map.
 func assertMapHasKey(t *testing.T, m map[string]any, key string) {
@@ -487,20 +504,20 @@ func assertMapHasKey(t *testing.T, m map[string]any, key string) {
 
 func TestRegisterHandler_ReturnsClientID(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
+		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             "my-azure-client-id",
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
 	body := `{"client_name":"test","redirect_uris":["https://app.example.com/callback"]}`
-	r := httptest.NewRequest(http.MethodPost, "/oauth/register", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
+	r := newReq(t, http.MethodPost, "/oauth/register", strings.NewReader(body))
+	r.Header.Set("Content-Type", testTypeJSON)
 	p.RegisterHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := w.Header().Get("Content-Type"); ct != testTypeJSON {
 		t.Fatalf("Content-Type = %q", ct)
 	}
 
@@ -524,13 +541,13 @@ func TestRegisterHandler_ReturnsClientID(t *testing.T) {
 
 func TestRegisterHandler_EchosRedirectURIs(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
+		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             "azure-id",
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	body := `{"redirect_uris":["https://claude.ai/api/mcp/auth_callback","https://app.example.com/cb"]}`
-	r := httptest.NewRequest(http.MethodPost, "/oauth/register", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
+	r := newReq(t, http.MethodPost, "/oauth/register", strings.NewReader(body))
+	r.Header.Set("Content-Type", testTypeJSON)
 	w := httptest.NewRecorder()
 	p.RegisterHandler().ServeHTTP(w, r)
 
@@ -558,12 +575,12 @@ func TestRegisterHandler_EchosRedirectURIs(t *testing.T) {
 
 func TestRegisterHandler_EmptyBody(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/oauth/register", http.NoBody)
+	r := newReq(t, http.MethodPost, "/oauth/register", http.NoBody)
 	p.RegisterHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusCreated {
@@ -579,8 +596,6 @@ func TestRegisterHandler_EmptyBody(t *testing.T) {
 		t.Fatalf("expected redirect_uris:[], got %v", resp["redirect_uris"])
 	}
 }
-
-// ── TokenHandler ────────────────────────────────────────────
 
 func TestTokenHandler_ProxiesToUpstream(t *testing.T) {
 	// Fake upstream token endpoint.
@@ -600,7 +615,7 @@ func TestTokenHandler_ProxiesToUpstream(t *testing.T) {
 			t.Errorf("body = %q, missing grant_type", body)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", testTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		if _, wErr := w.Write([]byte(`{"access_token":"tok-123","token_type":"Bearer","expires_in":3600}`)); wErr != nil {
 			t.Errorf("write: %v", wErr)
@@ -609,14 +624,14 @@ func TestTokenHandler_ProxiesToUpstream(t *testing.T) {
 	defer fakeToken.Close()
 
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// Manually set upstream token endpoint (normally set by ASMetadataHandler).
-	p.upstreamTokenEndpoint = fakeToken.URL
+	p.setStateForTest(fakeToken.URL, "")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/oauth/token",
+	r := newReq(t, http.MethodPost, "/oauth/token",
 		strings.NewReader("grant_type=authorization_code&code=abc123&redirect_uri=https://app.example.com/callback"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	p.TokenHandler().ServeHTTP(w, r)
@@ -624,7 +639,7 @@ func TestTokenHandler_ProxiesToUpstream(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := w.Header().Get("Content-Type"); ct != testTypeJSON {
 		t.Fatalf("Content-Type = %q", ct)
 	}
 
@@ -639,13 +654,13 @@ func TestTokenHandler_ProxiesToUpstream(t *testing.T) {
 
 func TestTokenHandler_NoUpstreamEndpoint(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// upstreamTokenEndpoint is empty — not yet fetched.
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/oauth/token",
+	r := newReq(t, http.MethodPost, "/oauth/token",
 		strings.NewReader("grant_type=authorization_code&code=abc"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	p.TokenHandler().ServeHTTP(w, r)
@@ -657,7 +672,7 @@ func TestTokenHandler_NoUpstreamEndpoint(t *testing.T) {
 
 func TestTokenHandler_UpstreamError(t *testing.T) {
 	fakeToken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", testTypeJSON)
 		w.WriteHeader(http.StatusBadRequest)
 		if _, wErr := w.Write([]byte(`{"error":"invalid_grant","error_description":"code expired"}`)); wErr != nil {
 			t.Errorf("write: %v", wErr)
@@ -666,13 +681,13 @@ func TestTokenHandler_UpstreamError(t *testing.T) {
 	defer fakeToken.Close()
 
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p.upstreamTokenEndpoint = fakeToken.URL
+	p.setStateForTest(fakeToken.URL, "")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/oauth/token",
+	r := newReq(t, http.MethodPost, "/oauth/token",
 		strings.NewReader("grant_type=authorization_code&code=expired"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	p.TokenHandler().ServeHTTP(w, r)
@@ -688,13 +703,13 @@ func TestTokenHandler_UpstreamError(t *testing.T) {
 
 func TestTokenHandler_UpstreamUnavailable(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p.upstreamTokenEndpoint = "http://127.0.0.1:1" // connection refused
+	p.setStateForTest("http://127.0.0.1:1", "") // connection refused
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/oauth/token",
+	r := newReq(t, http.MethodPost, "/oauth/token",
 		strings.NewReader("grant_type=authorization_code&code=abc"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	p.TokenHandler().ServeHTTP(w, r)
@@ -706,7 +721,7 @@ func TestTokenHandler_UpstreamUnavailable(t *testing.T) {
 
 func TestTokenHandler_ForwardsHeaders(t *testing.T) {
 	fakeToken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", testTypeJSON)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
 		w.WriteHeader(http.StatusOK)
@@ -717,13 +732,13 @@ func TestTokenHandler_ForwardsHeaders(t *testing.T) {
 	defer fakeToken.Close()
 
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p.upstreamTokenEndpoint = fakeToken.URL
+	p.setStateForTest(fakeToken.URL, "")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/oauth/token",
+	r := newReq(t, http.MethodPost, "/oauth/token",
 		strings.NewReader("grant_type=authorization_code&code=abc"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	p.TokenHandler().ServeHTTP(w, r)
@@ -736,20 +751,18 @@ func TestTokenHandler_ForwardsHeaders(t *testing.T) {
 	}
 }
 
-// ── AuthorizeHandler ────────────────────────────────────────
-
 func TestAuthorizeHandler_Redirect(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Trigger upstream fetch so upstreamAuthzEndpoint is populated.
 	w0 := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w0, newReq(t, http.MethodGet, "/", http.NoBody))
 	if w0.Code != http.StatusOK {
 		t.Fatalf("metadata: expected 200, got %d", w0.Code)
 	}
@@ -760,14 +773,14 @@ func TestAuthorizeHandler_Redirect(t *testing.T) {
 		"response_type=code&client_id=cid" +
 		"&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcallback" +
 		"&code_challenge=abc&code_challenge_method=S256&state=xyz"
-	r := httptest.NewRequest(http.MethodGet, authzURL, http.NoBody)
+	r := newReq(t, http.MethodGet, authzURL, http.NoBody)
 	p.AuthorizeHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", w.Code)
 	}
 	loc := w.Header().Get("Location")
-	if !strings.HasPrefix(loc, "https://fake-issuer.example.com/authorize?") {
+	if !strings.HasPrefix(loc, fakeAS.URL+"/authorize?") {
 		t.Fatalf("Location = %q, expected upstream authorize URL", loc)
 	}
 	if !strings.Contains(loc, "code_challenge=abc") {
@@ -779,26 +792,26 @@ func TestAuthorizeHandler_Redirect(t *testing.T) {
 }
 
 func TestAuthorizeHandler_NoQueryParams(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w0 := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w0, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/authorize", http.NoBody)
+	r := newReq(t, http.MethodGet, "/authorize", http.NoBody)
 	p.AuthorizeHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", w.Code)
 	}
 	loc := w.Header().Get("Location")
-	if loc != "https://fake-issuer.example.com/authorize" {
+	if loc != fakeAS.URL+"/authorize" {
 		t.Fatalf("Location = %q", loc)
 	}
 }
@@ -812,44 +825,44 @@ func TestBuildUpstreamScopeStr(t *testing.T) {
 	}{
 		{
 			name:     "no scopes returns empty",
-			resource: "api://abc",
+			resource: testResourceAPI,
 			scopes:   nil,
 			want:     "",
 		},
 		{
 			name:     "qualifies bare scope with resource",
 			resource: "api://00000000-0000-0000-0000-000000000001",
-			scopes:   []string{"myapi"},
+			scopes:   []string{testResourceMyAPI},
 			want:     "openid offline_access api://00000000-0000-0000-0000-000000000001/myapi",
 		},
 		{
 			name:     "strips trailing slash from resource",
 			resource: "api://abc/",
-			scopes:   []string{"read"},
+			scopes:   []string{testRead},
 			want:     "openid offline_access api://abc/read",
 		},
 		{
 			name:     "already-qualified scope not double-qualified",
-			resource: "api://abc",
+			resource: testResourceAPI,
 			scopes:   []string{"api://abc/myapi"},
 			want:     "openid offline_access api://abc/myapi",
 		},
 		{
 			name:     "no resource passes scope as-is",
 			resource: "",
-			scopes:   []string{"myapi"},
+			scopes:   []string{testResourceMyAPI},
 			want:     "openid offline_access myapi",
 		},
 		{
 			name:     "deduplicates openid and offline_access if in scopes",
-			resource: "api://abc",
-			scopes:   []string{"openid", "myapi"},
+			resource: testResourceAPI,
+			scopes:   []string{testScopeOpenID, testResourceMyAPI},
 			want:     "openid offline_access api://abc/myapi",
 		},
 		{
 			name:     "multiple scopes all qualified",
-			resource: "api://abc",
-			scopes:   []string{"read", "write"},
+			resource: testResourceAPI,
+			scopes:   []string{testRead, testWrite},
 			want:     "openid offline_access api://abc/read api://abc/write",
 		},
 	}
@@ -865,7 +878,7 @@ func TestBuildUpstreamScopeStr(t *testing.T) {
 }
 
 func TestAuthorizeHandler_RewritesScopeForAzureAD(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	// Simulate Azure AD setup: short scope name in OAuthRequiredScopes,
@@ -874,17 +887,17 @@ func TestAuthorizeHandler_RewritesScopeForAzureAD(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             "fake-client-id",
-		OAuthRequiredScopes:       []string{"myapi"},
+		OAuthRequiredScopes:       []string{testResourceMyAPI},
 		OAuthResource:             "api://00000000-0000-0000-0000-000000000001",
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w0 := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w0, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	// MCP client sends the short scope (stripped prefix) — the proxy must fix it.
 	w := httptest.NewRecorder()
 	q := "response_type=code&client_id=fake-client-id&scope=openid+offline_access+myapi&state=xyz"
-	r := httptest.NewRequest(http.MethodGet, "/authorize?"+q, http.NoBody)
+	r := newReq(t, http.MethodGet, "/authorize?"+q, http.NoBody)
 	p.AuthorizeHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusFound {
@@ -907,21 +920,21 @@ func TestAuthorizeHandler_RewritesScopeForAzureAD(t *testing.T) {
 }
 
 func TestAuthorizeHandler_NoScopeRewriteWhenNoResource(t *testing.T) {
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	// No OAuthResource configured: scope is not resource-qualified.
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
-		OAuthClientID:             "id",
-		OAuthRequiredScopes:       []string{"myapi"},
+		OAuthClientID:             testID,
+		OAuthRequiredScopes:       []string{testResourceMyAPI},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w0 := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w0, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w0, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/authorize?scope=myapi&state=s1", http.NoBody)
+	r := newReq(t, http.MethodGet, "/authorize?scope=myapi&state=s1", http.NoBody)
 	p.AuthorizeHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusFound {
@@ -934,7 +947,7 @@ func TestAuthorizeHandler_NoScopeRewriteWhenNoResource(t *testing.T) {
 	}
 	// upstreamScopeStr = "openid offline_access myapi" (no resource → no prefix)
 	gotScope := parsed.Query().Get("scope")
-	if !strings.Contains(gotScope, "myapi") {
+	if !strings.Contains(gotScope, testResourceMyAPI) {
 		t.Fatalf("scope %q should contain myapi", gotScope)
 	}
 	if strings.Contains(gotScope, "api://") {
@@ -944,15 +957,15 @@ func TestAuthorizeHandler_NoScopeRewriteWhenNoResource(t *testing.T) {
 
 func TestTokenHandler_RejectsWrongContentType(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p.upstreamTokenEndpoint = "https://example.com/token"
+	p.setStateForTest(testTokenURL, "")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/oauth/token",
+	r := newReq(t, http.MethodPost, "/oauth/token",
 		strings.NewReader(`{"grant_type":"authorization_code"}`))
-	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Content-Type", testTypeJSON)
 	p.TokenHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusBadRequest {
@@ -962,13 +975,13 @@ func TestTokenHandler_RejectsWrongContentType(t *testing.T) {
 
 func TestTokenHandler_RejectsMissingContentType(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p.upstreamTokenEndpoint = "https://example.com/token"
+	p.setStateForTest(testTokenURL, "")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/oauth/token",
+	r := newReq(t, http.MethodPost, "/oauth/token",
 		strings.NewReader("grant_type=authorization_code&code=abc"))
 	// No Content-Type header set.
 	p.TokenHandler().ServeHTTP(w, r)
@@ -980,14 +993,14 @@ func TestTokenHandler_RejectsMissingContentType(t *testing.T) {
 
 func TestTokenHandler_RejectsUnsupportedGrantType(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p.upstreamTokenEndpoint = "https://example.com/token"
+	p.setStateForTest(testTokenURL, "")
 
 	for _, gt := range []string{"client_credentials", "password", "urn:ietf:params:oauth:grant-type:jwt-bearer"} {
 		w := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		r := newReq(t, http.MethodPost, "/oauth/token",
 			strings.NewReader("grant_type="+gt+"&client_id=x"))
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		p.TokenHandler().ServeHTTP(w, r)
@@ -999,7 +1012,7 @@ func TestTokenHandler_RejectsUnsupportedGrantType(t *testing.T) {
 
 func TestTokenHandler_AcceptsRefreshToken(t *testing.T) {
 	fakeToken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", testTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		if _, wErr := w.Write([]byte(`{"access_token":"new-tok","token_type":"Bearer"}`)); wErr != nil {
 			t.Errorf("write: %v", wErr)
@@ -1008,13 +1021,13 @@ func TestTokenHandler_AcceptsRefreshToken(t *testing.T) {
 	defer fakeToken.Close()
 
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p.upstreamTokenEndpoint = fakeToken.URL
+	p.setStateForTest(fakeToken.URL, "")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/oauth/token",
+	r := newReq(t, http.MethodPost, "/oauth/token",
 		strings.NewReader("grant_type=refresh_token&refresh_token=rt-abc"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	p.TokenHandler().ServeHTTP(w, r)
@@ -1026,42 +1039,41 @@ func TestTokenHandler_AcceptsRefreshToken(t *testing.T) {
 
 func TestASMetadataHandler_MultiServerFailover(t *testing.T) {
 	// First server is unreachable; second is valid.
-	fakeAS := fakeUpstreamAS(t, validUpstreamJSON())
+	fakeAS := fakeUpstreamAS(t, validUpstreamJSON)
 	defer fakeAS.Close()
 
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{"http://127.0.0.1:1", fakeAS.URL},
-		OAuthClientID:             "id",
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	w := httptest.NewRecorder()
-	p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 with fallback server, got %d", w.Code)
 	}
-	if p.upstreamTokenEndpoint != "https://fake-issuer.example.com/token" {
-		t.Fatalf("upstreamTokenEndpoint = %q", p.upstreamTokenEndpoint)
+	st := p.loadState()
+	if st == nil || st.tokenEndpoint != fakeAS.URL+"/token" {
+		t.Fatalf("tokenEndpoint = %#v", st)
 	}
 }
 
 func TestAuthorizeHandler_NoUpstreamEndpoint(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// upstreamAuthzEndpoint is empty — not yet fetched.
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/authorize?state=abc", http.NoBody)
+	r := newReq(t, http.MethodGet, "/authorize?state=abc", http.NoBody)
 	p.AuthorizeHandler().ServeHTTP(w, r)
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", w.Code)
 	}
 }
-
-// ── End-to-end: metadata → register → authorize → token ────
 
 // newE2EProxy creates a proxy pointing at the given fake IDP for E2E testing.
 func newE2EProxy(t *testing.T, fakeIDPURL string) *OAuthProxy {
@@ -1080,16 +1092,17 @@ func newE2EProxy(t *testing.T, fakeIDPURL string) *OAuthProxy {
 // and token endpoint responses, emulating an upstream IdP.
 func fakeIDPServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(nil)
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.Contains(r.URL.Path, ".well-known"):
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Type", testTypeJSON)
 			w.WriteHeader(http.StatusOK)
-			if _, wErr := w.Write([]byte(validUpstreamJSON())); wErr != nil {
+			if _, wErr := w.Write([]byte(validUpstreamJSON(srv.URL))); wErr != nil {
 				t.Errorf("write: %v", wErr)
 			}
 		case strings.HasSuffix(r.URL.Path, "/token"):
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Type", testTypeJSON)
 			w.WriteHeader(http.StatusOK)
 			if _, wErr := w.Write([]byte(`{"access_token":"real-token","token_type":"Bearer"}`)); wErr != nil {
 				t.Errorf("write: %v", wErr)
@@ -1097,7 +1110,9 @@ func fakeIDPServer(t *testing.T) *httptest.Server {
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
+	})
+	srv.Start()
+	return srv
 }
 
 func TestOAuthProxy_EndToEnd(t *testing.T) {
@@ -1108,7 +1123,7 @@ func TestOAuthProxy_EndToEnd(t *testing.T) {
 
 	t.Run("metadata", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		p.ASMetadataHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+		p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d", w.Code)
 		}
@@ -1116,7 +1131,7 @@ func TestOAuthProxy_EndToEnd(t *testing.T) {
 
 	t.Run("register", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		p.RegisterHandler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/oauth/register",
+		p.RegisterHandler().ServeHTTP(w, newReq(t, http.MethodPost, "/oauth/register",
 			strings.NewReader(`{"client_name":"e2e"}`)))
 		if w.Code != http.StatusCreated {
 			t.Fatalf("expected 201, got %d", w.Code)
@@ -1129,9 +1144,9 @@ func TestOAuthProxy_EndToEnd(t *testing.T) {
 	})
 
 	t.Run("token", func(t *testing.T) {
-		p.upstreamTokenEndpoint = fakeIDP.URL + "/token"
+		p.setStateForTest(fakeIDP.URL+"/token", "")
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		req := newReq(t, http.MethodPost, "/oauth/token",
 			strings.NewReader("grant_type=authorization_code&code=test-code"))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		p.TokenHandler().ServeHTTP(w, req)
@@ -1146,8 +1161,6 @@ func TestOAuthProxy_EndToEnd(t *testing.T) {
 	})
 }
 
-// ── formValue ────────────────────────────────────────────────
-
 func TestFormValue(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1155,19 +1168,19 @@ func TestFormValue(t *testing.T) {
 		field string
 		want  []byte // nil = not found; []byte{} = found with empty value
 	}{
-		{"field at start", "key=val", "key", []byte("val")},
-		{"field in middle", "a=1&key=val&b=2", "key", []byte("val")},
-		{"field at end no amp", "a=1&key=val", "key", []byte("val")},
-		{"empty value at start", "key=&b=2", "key", []byte("")},
-		{"empty value at end", "a=1&key=", "key", []byte("")},
-		{"not found", "other=value&more=stuff", "key", nil},
-		{"empty body", "", "key", nil},
-		// Suffix prevention: "xkey=bad" must NOT match field "key".
-		{"suffix prevention", "xkey=bad&key=good", "key", []byte("good")},
+		{"field at start", "key=val", testKey, []byte("val")},
+		{"field in middle", "a=1&key=val&b=2", testKey, []byte("val")},
+		{"field at end no amp", "a=1&key=val", testKey, []byte("val")},
+		{"empty value at start", "key=&b=2", testKey, []byte("")},
+		{"empty value at end", "a=1&key=", testKey, []byte("")},
+		{"not found", "other=value&more=stuff", testKey, nil},
+		{"empty body", "", testKey, nil},
+		// Suffix prevention: "xkey=bad" must NOT match field testKey.
+		{"suffix prevention", "xkey=bad&key=good", testKey, []byte("good")},
 		// First of duplicates is returned.
-		{"first duplicate", "key=first&key=second", "key", []byte("first")},
+		{"first duplicate", "key=first&key=second", testKey, []byte("first")},
 		// Field with & in next param.
-		{"value ends before amp", "key=hello&other=x", "key", []byte("hello")},
+		{"value ends before amp", "key=hello&other=x", testKey, []byte("hello")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1184,12 +1197,10 @@ func TestFormValue(t *testing.T) {
 	}
 }
 
-// ── injectClientCredentials ──────────────────────────────────
-
 func TestInjectClientCredentials(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "my-client",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testClient,
 		OAuthClientSecret:         "my-secret",
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if p == nil {
@@ -1248,7 +1259,7 @@ func TestTokenHandler_InjectsClientCredentials(t *testing.T) {
 			t.Errorf("upstream read: %v", readErr)
 		}
 		gotBody = string(b)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", testTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		if _, writeErr := w.Write([]byte(`{"access_token":"t","token_type":"Bearer"}`)); writeErr != nil {
 			t.Errorf("upstream write: %v", writeErr)
@@ -1257,15 +1268,15 @@ func TestTokenHandler_InjectsClientCredentials(t *testing.T) {
 	defer upstream.Close()
 
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
+		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             "proxy-client",
 		OAuthClientSecret:         "proxy-secret",
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p.upstreamTokenEndpoint = upstream.URL
+	p.setStateForTest(upstream.URL, "")
 
 	// MCP client sends its own (wrong) client_id — proxy must replace it.
 	body := "grant_type=authorization_code&code=xyz&client_id=mcp-client"
-	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r := newReq(t, http.MethodPost, "/token", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	p.TokenHandler().ServeHTTP(w, r)
@@ -1276,10 +1287,10 @@ func TestTokenHandler_InjectsClientCredentials(t *testing.T) {
 
 	// Parse what the upstream received.
 	vals := make(map[string]string)
-	for _, pair := range strings.Split(gotBody, "&") {
-		kv := strings.SplitN(pair, "=", 2)
-		if len(kv) == 2 {
-			vals[kv[0]] = kv[1]
+	for pair := range strings.SplitSeq(gotBody, "&") {
+		k, v, found := strings.Cut(pair, "=")
+		if found {
+			vals[k] = v
 		}
 	}
 	if vals["client_id"] != "proxy-client" {
@@ -1300,12 +1311,12 @@ func TestTokenHandler_InjectsClientCredentials(t *testing.T) {
 // TestTokenHandler_BodyReadError verifies the read-error path in readTokenBody.
 func TestTokenHandler_BodyReadError(t *testing.T) {
 	p := NewOAuthProxy(&Config{
-		OAuthAuthorizationServers: []string{"https://example.com"},
-		OAuthClientID:             "id",
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             testID,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p.upstreamTokenEndpoint = "https://example.com/token"
+	p.setStateForTest(testTokenURL, "")
 
-	r := httptest.NewRequest(http.MethodPost, "/token", &errBody{})
+	r := newReq(t, http.MethodPost, "/token", &errBody{})
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	p.TokenHandler().ServeHTTP(w, r)
@@ -1319,3 +1330,190 @@ type errBody struct{}
 
 func (e *errBody) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 func (e *errBody) Close() error             { return nil }
+
+// BenchmarkProxy_RegisterHandler measures the DCR shim handler throughput.
+func BenchmarkProxy_RegisterHandler(b *testing.B) {
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             "bench-client",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := p.RegisterHandler()
+	body := `{"client_name":"bench"}`
+	b.ReportAllocs()
+
+	for b.Loop() {
+		rec := httptest.NewRecorder()
+		req := newReq(b, http.MethodPost, "/oauth/register", strings.NewReader(body))
+		handler.ServeHTTP(rec, req)
+	}
+}
+
+// BenchmarkProxy_ASMetadata measures the cached AS metadata response path.
+func BenchmarkProxy_ASMetadata(b *testing.B) {
+	fakeAS := httptest.NewUnstartedServer(nil)
+	fakeAS.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", testTypeJSON)
+		w.WriteHeader(http.StatusOK)
+		body := `{"issuer":"` + fakeAS.URL + `",` +
+			`"authorization_endpoint":"` + fakeAS.URL + `/authorize",` +
+			`"token_endpoint":"` + fakeAS.URL + `/token"}`
+		if _, err := w.Write([]byte(body)); err != nil {
+			b.Errorf("write: %v", err)
+		}
+	})
+	fakeAS.Start()
+	defer fakeAS.Close()
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{fakeAS.URL},
+		OAuthClientID:             "bench-client",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := p.ASMetadataHandler()
+	warmup := httptest.NewRecorder()
+	handler.ServeHTTP(warmup, newReq(b, http.MethodGet, "/", http.NoBody))
+	if warmup.Code != http.StatusOK {
+		b.Fatalf("warmup failed: %d", warmup.Code)
+	}
+	b.ReportAllocs()
+
+	for b.Loop() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newReq(b, http.MethodGet, "/", http.NoBody))
+	}
+}
+
+// BenchmarkProxy_TokenHandler measures the token proxy handler throughput.
+func BenchmarkProxy_TokenHandler(b *testing.B) {
+	fakeToken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", testTypeJSON)
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"access_token":"t","token_type":"Bearer"}`)); err != nil {
+			b.Errorf("write: %v", err)
+		}
+	}))
+	defer fakeToken.Close()
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{testHTTPS},
+		OAuthClientID:             "bench-client",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p.setStateForTest(fakeToken.URL, "")
+	handler := p.TokenHandler()
+	b.ReportAllocs()
+
+	for b.Loop() {
+		rec := httptest.NewRecorder()
+		req := newReq(b, http.MethodPost, "/oauth/token",
+			strings.NewReader("grant_type=authorization_code&code=bench"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		handler.ServeHTTP(rec, req)
+	}
+}
+
+// TestOAuthProxy_RetriesAfterUpstreamFailure pins the architectural
+// invariant that a transient failure on upstream AS metadata fetch does
+// not wedge the proxy permanently. Before this regression test, the
+// implementation used sync.Once and would never re-attempt.
+func TestOAuthProxy_RetriesAfterUpstreamFailure(t *testing.T) {
+	t.Parallel()
+	var mode atomic.Int32 // 0 = fail, 1 = succeed
+
+	srv := httptest.NewUnstartedServer(nil)
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if mode.Load() == 0 {
+			http.Error(w, "transient", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		body := `{"issuer":"` + srv.URL + `",` +
+			`"authorization_endpoint":"` + srv.URL + `/auth",` +
+			`"token_endpoint":"` + srv.URL + `/token"}`
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	})
+	srv.Start()
+	defer srv.Close()
+
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{srv.URL},
+		OAuthClientID:             testID,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// First call: upstream fails — must surface 502.
+	w1 := httptest.NewRecorder()
+	p.ASMetadataHandler().ServeHTTP(w1, newReq(t, http.MethodGet, "/", http.NoBody))
+	if w1.Code != http.StatusBadGateway {
+		t.Fatalf("first call: expected 502, got %d", w1.Code)
+	}
+
+	// Upstream recovers.
+	mode.Store(1)
+
+	// Second call: must retry and succeed.
+	w2 := httptest.NewRecorder()
+	p.ASMetadataHandler().ServeHTTP(w2, newReq(t, http.MethodGet, "/", http.NoBody))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second call after upstream recovery: expected 200, got %d (body=%s)", w2.Code, w2.Body.String())
+	}
+}
+
+// TestOAuthProxy_TokenEndpoint_RetriesAfterFailure verifies the same
+// retry behavior reaches the TokenHandler path.
+func TestOAuthProxy_TokenEndpoint_RetriesAfterFailure(t *testing.T) {
+	t.Parallel()
+	var asMode atomic.Int32
+
+	// Combined AS + token server so issuer-host validation
+	// host validation accepts the published endpoints.
+	asSrv := httptest.NewUnstartedServer(nil)
+	asSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", testTypeJSON)
+			w.WriteHeader(http.StatusOK)
+			if _, err := io.WriteString(w, `{"access_token":"x","token_type":"Bearer"}`); err != nil {
+				t.Errorf("write: %v", err)
+			}
+			return
+		}
+		if asMode.Load() == 0 {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", testTypeJSON)
+		w.WriteHeader(http.StatusOK)
+		body := `{"issuer":"` + asSrv.URL + `",` +
+			`"authorization_endpoint":"` + asSrv.URL + `/auth",` +
+			`"token_endpoint":"` + asSrv.URL + `/token"}`
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	})
+	asSrv.Start()
+	defer asSrv.Close()
+
+	p := NewOAuthProxy(&Config{
+		OAuthAuthorizationServers: []string{asSrv.URL},
+		OAuthClientID:             testID,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// First TokenHandler call fails because upstream metadata not ready.
+	w1 := httptest.NewRecorder()
+	r1 := newReq(t, http.MethodPost, "/token", http.NoBody)
+	r1.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	p.TokenHandler().ServeHTTP(w1, r1)
+	if w1.Code != http.StatusBadGateway {
+		t.Fatalf("first call: expected 502, got %d", w1.Code)
+	}
+
+	asMode.Store(1)
+
+	// Second call: ensure_TokenEndpoint retries and the upstream request fires.
+	w2 := httptest.NewRecorder()
+	r2 := newReq(t, http.MethodPost, "/token",
+		strings.NewReader("grant_type=authorization_code&code=x"))
+	r2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	p.TokenHandler().ServeHTTP(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second call after AS recovery: expected 200, got %d", w2.Code)
+	}
+}

@@ -2,17 +2,16 @@ package authware
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
 func TestBearerAuthenticator_Success(t *testing.T) {
-	a, err := New(&Config{Mode: ModeBearer, BearerToken: "secret"}, nil)
+	a, err := New(&Config{Mode: ModeBearer, BearerToken: testSecret}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "https://example.com/api", http.NoBody)
+	req := newReq(t, http.MethodGet, "https://example.com/api", http.NoBody)
 	req.Header.Set("Authorization", "Bearer secret")
 	id, err := a.Authenticate(req)
 	if err != nil {
@@ -31,7 +30,7 @@ func TestBearerAuthenticator_WrongToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer wrong")
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected auth failure")
@@ -43,36 +42,70 @@ func TestBearerAuthenticator_MissingHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
 	if _, err := a.Authenticate(req); err == nil {
 		t.Fatal("expected auth failure")
 	}
 }
 
 func TestBearerAuthenticator_Challenge(t *testing.T) {
-	a, err := New(&Config{Mode: ModeBearer, BearerToken: "tok"}, nil)
+	a, err := New(&Config{Mode: ModeBearer, BearerToken: testTok}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	aErr := &authError{status: http.StatusUnauthorized, message: "fail", scheme: "Bearer", code: "invalid_token"}
+	aErr := &authError{status: http.StatusUnauthorized, message: testFail, scheme: schemeBearer, code: "invalid_token"}
 	status, header, msg := a.Challenge(aErr, "https://example.com/.well-known/oauth-protected-resource")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("status = %d", status)
 	}
-	if !strings.Contains(header, "Bearer") {
+	if !strings.Contains(header, schemeBearer) {
 		t.Fatalf("header = %q", header)
 	}
-	if msg != "fail" {
+	if msg != testFail {
 		t.Fatalf("message = %q", msg)
 	}
 }
 
 func TestBearerAuthenticator_Metadata(t *testing.T) {
-	a, err := New(&Config{Mode: ModeBearer, BearerToken: "tok"}, nil)
+	a, err := New(&Config{Mode: ModeBearer, BearerToken: testTok}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if md := a.Metadata("https://example.com"); md != nil {
+	if md := a.Metadata(testHTTPS); md != nil {
 		t.Fatalf("expected nil metadata, got %+v", md)
+	}
+}
+
+// BenchmarkBearer measures the static bearer hot path on success.
+func BenchmarkBearer(b *testing.B) {
+	auth, err := New(&Config{Mode: ModeBearer, BearerToken: "supersecrettoken"}, nil)
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	req := newReq(b, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("Authorization", "Bearer supersecrettoken")
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := auth.Authenticate(req); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkBearerFail measures the rejection path.
+func BenchmarkBearerFail(b *testing.B) {
+	auth, err := New(&Config{Mode: ModeBearer, BearerToken: "supersecrettoken"}, nil)
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	req := newReq(b, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("Authorization", "Bearer wrongtoken12345")
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := auth.Authenticate(req); err == nil {
+			b.Fatal("expected auth failure")
+		}
 	}
 }
