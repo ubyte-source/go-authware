@@ -120,6 +120,7 @@ func (p *OAuthProxy) ensureFetched(ctx context.Context) (*proxyState, bool) {
 	if st := p.loadState(); st != nil {
 		return st, true
 	}
+	//nolint:contextcheck // singleflight: shared fetch uses its own timeout; caller ctx honored at the select below.
 	call := p.beginFetch()
 	select {
 	case <-call.done:

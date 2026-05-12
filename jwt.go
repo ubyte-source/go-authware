@@ -920,6 +920,7 @@ func (a *oauthAuthenticator) refreshKeys(ctx context.Context) (map[string]jwkPub
 		return nil, errJWKSEndpoint
 	}
 
+	//nolint:contextcheck // singleflight: shared fetch uses its own timeout; caller ctx honored at the select below.
 	call := a.beginKeysFetch()
 	select {
 	case <-call.done:
@@ -1009,13 +1010,13 @@ func (a *oauthAuthenticator) fetchAndParseJWKS(
 		return nil, fmt.Errorf("JWKS endpoint: %w", schemeErr)
 	}
 
-	//nolint:gosec // G704: jwksURL gated by requireHTTPS above.
+	//nolint:gosec // jwksURL validated by requireHTTPS above; sourced from config or trusted OIDC discovery.
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, http.NoBody)
 	if reqErr != nil {
 		return nil, reqErr
 	}
 
-	//nolint:gosec // G704: request URL is operator-configured and HTTPS-gated.
+	//nolint:gosec // request URL validated by requireHTTPS above; not user-controlled.
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return nil, err

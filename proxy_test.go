@@ -14,14 +14,14 @@ import (
 )
 
 func TestNewOAuthProxy_NilOnEmptyConfig(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.DiscardHandler)
 	if p := NewOAuthProxy(&Config{}, log); p != nil {
 		t.Fatal("expected nil for empty config")
 	}
 }
 
 func TestNewOAuthProxy_NilOnMissingClientID(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.DiscardHandler)
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 	}, log)
@@ -31,7 +31,7 @@ func TestNewOAuthProxy_NilOnMissingClientID(t *testing.T) {
 }
 
 func TestNewOAuthProxy_NilOnMissingServers(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.DiscardHandler)
 	p := NewOAuthProxy(&Config{
 		OAuthClientID: testClientID,
 	}, log)
@@ -41,7 +41,7 @@ func TestNewOAuthProxy_NilOnMissingServers(t *testing.T) {
 }
 
 func TestNewOAuthProxy_Valid(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.DiscardHandler)
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testClientID,
@@ -68,7 +68,7 @@ func TestNewOAuthProxy_NilLogger(t *testing.T) {
 }
 
 func TestNewOAuthProxy_CopiesRequiredScopes(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.DiscardHandler)
 	scopes := []string{"api://app/.default", testScopeOpenID}
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
@@ -83,7 +83,7 @@ func TestNewOAuthProxy_CopiesRequiredScopes(t *testing.T) {
 }
 
 func TestNewOAuthProxy_CopiesServers(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.DiscardHandler)
 	servers := []string{"https://a.com", "https://b.com"}
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: servers,
@@ -153,7 +153,7 @@ func TestASMetadataHandler_Success(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testClient,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	r := newReq(t, http.MethodGet, "/.well-known/oauth-authorization-server", http.NoBody)
@@ -196,7 +196,7 @@ func TestASMetadataHandler_ScopesSupportedIncludesRequiredScopes(t *testing.T) {
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
 		OAuthRequiredScopes:       []string{"api://00000000-0000-0000-0000-000000000001/.default"},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -242,7 +242,7 @@ func TestASMetadataHandler_ScopesSupportedNoDuplicates(t *testing.T) {
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
 		OAuthRequiredScopes:       []string{testScopeOpenID, "custom"},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -278,7 +278,7 @@ func TestASMetadataHandler_ScopesSupportedNoExtraScopes(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -304,7 +304,7 @@ func TestASMetadataHandler_StoresUpstreamEndpoints(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -325,7 +325,7 @@ func TestASMetadataHandler_UpstreamUnavailable(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{"http://127.0.0.1:1"}, // connection refused
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -352,7 +352,7 @@ func TestASMetadataHandler_Caching(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	handler := p.ASMetadataHandler()
 	for range 5 {
@@ -375,7 +375,7 @@ func TestASMetadataHandler_InvalidJSON(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -394,7 +394,7 @@ func TestASMetadataHandler_MissingIssuer(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -412,7 +412,7 @@ func TestASMetadataHandler_MissingAuthorizationEndpoint(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -431,7 +431,7 @@ func TestASMetadataHandler_UpstreamHTTPError(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -463,7 +463,7 @@ func TestASMetadataHandler_FallbackToOAuthASURL(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -484,7 +484,7 @@ func TestASMetadataHandler_TrailingSlashTrimmed(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL + "///"},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -506,7 +506,7 @@ func TestRegisterHandler_ReturnsClientID(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             "my-azure-client-id",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	body := `{"client_name":"test","redirect_uris":["https://app.example.com/callback"]}`
@@ -543,7 +543,7 @@ func TestRegisterHandler_EchosRedirectURIs(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             "azure-id",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	body := `{"redirect_uris":["https://claude.ai/api/mcp/auth_callback","https://app.example.com/cb"]}`
 	r := newReq(t, http.MethodPost, "/oauth/register", strings.NewReader(body))
@@ -577,7 +577,7 @@ func TestRegisterHandler_EmptyBody(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	r := newReq(t, http.MethodPost, "/oauth/register", http.NoBody)
@@ -626,7 +626,7 @@ func TestTokenHandler_ProxiesToUpstream(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	// Manually set upstream token endpoint (normally set by ASMetadataHandler).
 	p.setStateForTest(fakeToken.URL, "")
 
@@ -656,7 +656,7 @@ func TestTokenHandler_NoUpstreamEndpoint(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	// upstreamTokenEndpoint is empty — not yet fetched.
 
 	w := httptest.NewRecorder()
@@ -683,7 +683,7 @@ func TestTokenHandler_UpstreamError(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest(fakeToken.URL, "")
 
 	w := httptest.NewRecorder()
@@ -705,7 +705,7 @@ func TestTokenHandler_UpstreamUnavailable(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest("http://127.0.0.1:1", "") // connection refused
 
 	w := httptest.NewRecorder()
@@ -734,7 +734,7 @@ func TestTokenHandler_ForwardsHeaders(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest(fakeToken.URL, "")
 
 	w := httptest.NewRecorder()
@@ -758,7 +758,7 @@ func TestAuthorizeHandler_Redirect(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	// Trigger upstream fetch so upstreamAuthzEndpoint is populated.
 	w0 := httptest.NewRecorder()
@@ -798,7 +798,7 @@ func TestAuthorizeHandler_NoQueryParams(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w0 := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w0, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -889,7 +889,7 @@ func TestAuthorizeHandler_RewritesScopeForAzureAD(t *testing.T) {
 		OAuthClientID:             "fake-client-id",
 		OAuthRequiredScopes:       []string{testResourceMyAPI},
 		OAuthResource:             "api://00000000-0000-0000-0000-000000000001",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w0 := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w0, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -928,7 +928,7 @@ func TestAuthorizeHandler_NoScopeRewriteWhenNoResource(t *testing.T) {
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             testID,
 		OAuthRequiredScopes:       []string{testResourceMyAPI},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w0 := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w0, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -959,7 +959,7 @@ func TestTokenHandler_RejectsWrongContentType(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest(testTokenURL, "")
 
 	w := httptest.NewRecorder()
@@ -977,7 +977,7 @@ func TestTokenHandler_RejectsMissingContentType(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest(testTokenURL, "")
 
 	w := httptest.NewRecorder()
@@ -995,7 +995,7 @@ func TestTokenHandler_RejectsUnsupportedGrantType(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest(testTokenURL, "")
 
 	for _, gt := range []string{"client_credentials", "password", "urn:ietf:params:oauth:grant-type:jwt-bearer"} {
@@ -1023,7 +1023,7 @@ func TestTokenHandler_AcceptsRefreshToken(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest(fakeToken.URL, "")
 
 	w := httptest.NewRecorder()
@@ -1045,7 +1045,7 @@ func TestASMetadataHandler_MultiServerFailover(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{"http://127.0.0.1:1", fakeAS.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	w := httptest.NewRecorder()
 	p.ASMetadataHandler().ServeHTTP(w, newReq(t, http.MethodGet, "/", http.NoBody))
@@ -1063,7 +1063,7 @@ func TestAuthorizeHandler_NoUpstreamEndpoint(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	// upstreamAuthzEndpoint is empty — not yet fetched.
 
 	w := httptest.NewRecorder()
@@ -1081,7 +1081,7 @@ func newE2EProxy(t *testing.T, fakeIDPURL string) *OAuthProxy {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeIDPURL},
 		OAuthClientID:             "e2e-client",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	if p == nil {
 		t.Fatal("expected non-nil proxy")
 	}
@@ -1202,7 +1202,7 @@ func TestInjectClientCredentials(t *testing.T) {
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testClient,
 		OAuthClientSecret:         "my-secret",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	if p == nil {
 		t.Fatal("NewOAuthProxy returned nil")
 	}
@@ -1271,7 +1271,7 @@ func TestTokenHandler_InjectsClientCredentials(t *testing.T) {
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             "proxy-client",
 		OAuthClientSecret:         "proxy-secret",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest(upstream.URL, "")
 
 	// MCP client sends its own (wrong) client_id — proxy must replace it.
@@ -1313,7 +1313,7 @@ func TestTokenHandler_BodyReadError(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest(testTokenURL, "")
 
 	r := newReq(t, http.MethodPost, "/token", &errBody{})
@@ -1336,7 +1336,7 @@ func BenchmarkProxy_RegisterHandler(b *testing.B) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             "bench-client",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	handler := p.RegisterHandler()
 	body := `{"client_name":"bench"}`
 	b.ReportAllocs()
@@ -1366,7 +1366,7 @@ func BenchmarkProxy_ASMetadata(b *testing.B) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{fakeAS.URL},
 		OAuthClientID:             "bench-client",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	handler := p.ASMetadataHandler()
 	warmup := httptest.NewRecorder()
 	handler.ServeHTTP(warmup, newReq(b, http.MethodGet, "/", http.NoBody))
@@ -1394,7 +1394,7 @@ func BenchmarkProxy_TokenHandler(b *testing.B) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{testHTTPS},
 		OAuthClientID:             "bench-client",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 	p.setStateForTest(fakeToken.URL, "")
 	handler := p.TokenHandler()
 	b.ReportAllocs()
@@ -1437,7 +1437,7 @@ func TestOAuthProxy_RetriesAfterUpstreamFailure(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{srv.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	// First call: upstream fails — must surface 502.
 	w1 := httptest.NewRecorder()
@@ -1494,7 +1494,7 @@ func TestOAuthProxy_TokenEndpoint_RetriesAfterFailure(t *testing.T) {
 	p := NewOAuthProxy(&Config{
 		OAuthAuthorizationServers: []string{asSrv.URL},
 		OAuthClientID:             testID,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.DiscardHandler))
 
 	// First TokenHandler call fails because upstream metadata not ready.
 	w1 := httptest.NewRecorder()

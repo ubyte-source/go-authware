@@ -1,0 +1,51 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Fuzz duration per target (e.g. 5m, 30m)"
+        required: false
+        default: "10m"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: ., target: FuzzSplitJWT }
+          - { pkg: ., target: FuzzParseJWTHeaderDirect }
+          - { pkg: ., target: FuzzExtractClaims }
+          - { pkg: ., target: FuzzDecodeAlg }
+          - { pkg: ., target: FuzzDecodeClaimValue }
+          - { pkg: ., target: FuzzSanitiseHeaderValue }
+          - { pkg: ., target: FuzzRequireHTTPS }
+          - { pkg: ., target: FuzzAlgorithmConfusion }
+          - { pkg: ./replay, target: FuzzVerify }
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Run fuzz
+        run: go test -run=^$ -fuzz=^${{ matrix.target }}$ -fuzztime=${{ github.event.inputs.fuzztime || '10m' }} ${{ matrix.pkg }}
+
+      - name: Upload corpus on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: ${{ matrix.pkg }}/testdata/fuzz/${{ matrix.target }}
+          if-no-files-found: ignore
