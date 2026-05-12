@@ -32,7 +32,7 @@ jobs:
           - { pkg: ./replay, target: FuzzVerify }
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -44,7 +44,7 @@ jobs:
 
       - name: Upload corpus on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-corpus-${{ matrix.target }}
           path: ${{ matrix.pkg }}/testdata/fuzz/${{ matrix.target }}
