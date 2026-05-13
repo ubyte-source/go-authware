@@ -4,7 +4,10 @@
 > anti-replay for Go services. Stdlib + `go-jsonfast`. Nothing else.
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-blue.svg)](https://golang.org)
-[![CI](https://github.com/ubyte-source/go-authware/actions/workflows/ci.yml/badge.svg)](https://github.com/ubyte-source/go-authware/actions/workflows/ci.yml)
+[![Lint](https://github.com/ubyte-source/go-authware/actions/workflows/lint.yml/badge.svg)](https://github.com/ubyte-source/go-authware/actions/workflows/lint.yml)
+[![Test](https://github.com/ubyte-source/go-authware/actions/workflows/test.yml/badge.svg)](https://github.com/ubyte-source/go-authware/actions/workflows/test.yml)
+[![Security](https://github.com/ubyte-source/go-authware/actions/workflows/security.yml/badge.svg)](https://github.com/ubyte-source/go-authware/actions/workflows/security.yml)
+[![Fuzz](https://github.com/ubyte-source/go-authware/actions/workflows/fuzz.yml/badge.svg)](https://github.com/ubyte-source/go-authware/actions/workflows/fuzz.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ubyte-source/go-authware)](https://goreportcard.com/report/github.com/ubyte-source/go-authware)
 [![Go Reference](https://pkg.go.dev/badge/github.com/ubyte-source/go-authware.svg)](https://pkg.go.dev/github.com/ubyte-source/go-authware)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
