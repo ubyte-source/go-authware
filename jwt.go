@@ -1010,13 +1010,13 @@ func (a *oauthAuthenticator) fetchAndParseJWKS(
 		return nil, fmt.Errorf("JWKS endpoint: %w", schemeErr)
 	}
 
-	//nolint:gosec // jwksURL validated by requireHTTPS above; sourced from config or trusted OIDC discovery.
+	//nolint:gosec // G704: jwksURL validated by requireHTTPS above; sourced from config or trusted OIDC discovery.
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, http.NoBody)
 	if reqErr != nil {
 		return nil, reqErr
 	}
 
-	//nolint:gosec // request URL validated by requireHTTPS above; not user-controlled.
+	//nolint:gosec // G704: request URL validated by requireHTTPS above; not user-controlled.
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return nil, err

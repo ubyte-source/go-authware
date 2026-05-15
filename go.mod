@@ -1,5 +1,5 @@
 module github.com/ubyte-source/go-authware
 
-go 1.25.9
+go 1.25.10
 
-require github.com/ubyte-source/go-jsonfast v0.2.3
+require github.com/ubyte-source/go-jsonfast v0.2.4
