@@ -2,6 +2,7 @@ package authware
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 )
 
@@ -121,8 +122,18 @@ func FuzzRequireHTTPS(f *testing.F) {
 }
 
 func startsWithLoopback(rest string) bool {
+	if at := strings.IndexAny(rest, "@/?#"); at >= 0 && rest[at] == '@' {
+		rest = rest[at+1:]
+	}
 	for _, h := range []string{"localhost", "127.0.0.1", "[::1]"} {
-		if len(rest) >= len(h) && rest[:len(h)] == h {
+		if !strings.HasPrefix(rest, h) {
+			continue
+		}
+		if len(rest) == len(h) {
+			return true
+		}
+		switch rest[len(h)] {
+		case ':', '/', '?', '#':
 			return true
 		}
 	}
