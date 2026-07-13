@@ -248,7 +248,7 @@ func TestMemory_Expiry(t *testing.T) {
 	}
 }
 
-func TestMemory_LRUOverflow(t *testing.T) {
+func TestMemory_FullOfLiveNoncesFailsClosed(t *testing.T) {
 	m, mErr := Memory(2)
 	if mErr != nil {
 		t.Fatal(mErr)
@@ -259,16 +259,55 @@ func TestMemory_LRUOverflow(t *testing.T) {
 	if _, err := m.Seen(context.Background(), "b", time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Seen(context.Background(), "c", time.Hour); err != nil {
-		t.Fatal(err)
+	if _, err := m.Seen(context.Background(), "c", time.Hour); !errors.Is(err, ErrStoreFull) {
+		t.Fatalf("err = %v, want ErrStoreFull", err)
 	}
-	// "a" was the LRU and must have been evicted.
+	// Live nonces must survive the rejected insert.
 	seen, err := m.Seen(context.Background(), "a", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seen {
-		t.Fatal("LRU entry should have been evicted")
+	if !seen {
+		t.Fatal("live entry must not be evicted by an insert at capacity")
+	}
+}
+
+func TestMemory_ExpiredEntriesFreeCapacity(t *testing.T) {
+	m, mErr := Memory(2)
+	if mErr != nil {
+		t.Fatal(mErr)
+	}
+	if _, err := m.Seen(context.Background(), "a", time.Nanosecond); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Seen(context.Background(), "b", time.Nanosecond); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	if _, err := m.Seen(context.Background(), "c", time.Hour); err != nil {
+		t.Fatalf("expired entries should free capacity, got %v", err)
+	}
+}
+
+// A replay at the exact edge of the timestamp window must still find
+// the nonce in the store.
+func TestVerify_BoundaryReplayRejected(t *testing.T) {
+	s := newSigner(t)
+	v := newVerifier()
+	r := mustRequest(t, http.MethodGet, "https://api.example/path")
+	if err := s.Sign(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Verify(context.Background(), r); err != nil {
+		t.Fatalf("first Verify: %v", err)
+	}
+	ts, err := strconv.ParseInt(r.Header.Get(HeaderTimestamp), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Now = func() time.Time { return time.Unix(ts, 0).Add(v.Window) }
+	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrNonceReplayed) {
+		t.Fatalf("err = %v, want ErrNonceReplayed", err)
 	}
 }
 
@@ -440,7 +479,7 @@ func BenchmarkVerify_Hit(b *testing.B) {
 	}
 }
 
-// BenchmarkMemory_Seen measures the LRU+TTL store hot path.
+// BenchmarkMemory_Seen measures the TTL store hot path.
 func BenchmarkMemory_Seen(b *testing.B) {
 	m, mErr := Memory(1 << 16)
 	if mErr != nil {

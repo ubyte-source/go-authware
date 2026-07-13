@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ubyte-source/go-jsonfast"
@@ -51,6 +52,29 @@ func (e *OAuth2Error) Error() string {
 // 2xx but the body cannot be parsed or carries no access_token.
 var ErrInvalidTokenResponse = errors.New("oauth2: invalid token response")
 
+// ErrInsecureTokenURL is returned when a token endpoint would receive
+// credentials over plaintext HTTP to a non-loopback host.
+var ErrInsecureTokenURL = errors.New("cred: token URL must be https")
+
+// requireSecureURL rejects token endpoints that are neither https nor
+// http to a loopback host.
+func requireSecureURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%w: %q", ErrInsecureTokenURL, raw)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %q", ErrInsecureTokenURL, raw)
+}
+
 // ClientCredentials implements the OAuth2 client_credentials grant.
 // When ClientSecret is non-empty, HTTP Basic auth is used.
 type ClientCredentials struct {
@@ -83,7 +107,8 @@ func (c *ClientCredentials) Token(ctx context.Context) (*Token, error) {
 
 // AuthorizationCode implements the OAuth2 refresh_token grant. On
 // successful refresh, when the response carries a new refresh_token,
-// the RefreshToken field is rotated in place.
+// the RefreshToken field is rotated in place. Token serializes callers:
+// concurrent exchanges would race the single-use refresh_token.
 type AuthorizationCode struct {
 	Client       *http.Client
 	TokenURL     string
@@ -91,10 +116,13 @@ type AuthorizationCode struct {
 	ClientSecret string
 	RefreshToken string
 	Scopes       []string
+	mu           sync.Mutex
 }
 
 // Token exchanges the stored refresh_token for a fresh access_token.
 func (a *AuthorizationCode) Token(ctx context.Context) (*Token, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.RefreshToken == "" {
 		return nil, &OAuth2Error{Code: "invalid_request", Description: "missing refresh_token"}
 	}
@@ -148,9 +176,12 @@ func postFormToken(
 	endpoint string,
 	form url.Values,
 	basicID, basicSecret string,
-) (*tokenResponse, error) {
+) (out *tokenResponse, err error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("%w: empty token URL", ErrInvalidTokenResponse)
+	}
+	if secErr := requireSecureURL(endpoint); secErr != nil {
+		return nil, secErr
 	}
 	req, err := buildTokenRequest(ctx, endpoint, form, basicID, basicSecret)
 	if err != nil {
@@ -163,7 +194,7 @@ func postFormToken(
 	if err != nil {
 		return nil, err
 	}
-	defer closeBody(resp.Body)
+	defer func() { err = closeBody(resp.Body, err) }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenBodyBytes))
 	if err != nil {
 		return nil, err
@@ -193,16 +224,20 @@ func buildTokenRequest(
 	return req, nil
 }
 
+// closeBody returns err, or the Close error when err is nil.
+func closeBody(body io.Closer, err error) error {
+	if closeErr := body.Close(); closeErr != nil && err == nil {
+		return closeErr
+	}
+	return err
+}
+
 func decodeAndValidate(raw []byte) (*tokenResponse, error) {
 	out := parseTokenResponse(raw)
 	if out.AccessToken == "" {
 		return nil, fmt.Errorf("%w: missing access_token", ErrInvalidTokenResponse)
 	}
 	return out, nil
-}
-
-func closeBody(body io.Closer) {
-	_ = body.Close() //nolint:errcheck // body fully read above.
 }
 
 func parseTokenResponse(body []byte) *tokenResponse {

@@ -28,7 +28,7 @@ const (
 
 const (
 	defaultWindow      = 5 * time.Minute
-	defaultMemorySize  = 8192
+	defaultMemorySize  = 65536
 	nonceBytes         = 16
 	hexNonceLen        = nonceBytes * 2
 	hexSignatureLen    = sha256.Size * 2
@@ -48,6 +48,7 @@ var (
 	ErrNonceReplayed    = errors.New("replay: nonce already seen")
 	ErrShortKey         = errors.New("replay: key must be at least 32 bytes")
 	ErrMemoryCapacity   = errors.New("replay: Memory capacity must be > 0")
+	ErrStoreFull        = errors.New("replay: nonce store full")
 )
 
 // NonceStore records nonces that have been seen so [Verifier.Verify]
@@ -271,7 +272,9 @@ func (v *Verifier) Verify(ctx context.Context, r *http.Request) error {
 	if subtle.ConstantTimeCompare(stringBytes(sig), scratch.sigOut[:]) != 1 {
 		return ErrSignatureInvalid
 	}
-	seen, err := v.store().Seen(ctx, nonce, v.window())
+	// Retain the nonce for as long as its timestamp can still pass
+	// checkSkew: ts may lead now by window, plus a second of truncation.
+	seen, err := v.store().Seen(ctx, nonce, 2*v.window()+time.Second)
 	if err != nil {
 		return err
 	}
@@ -362,7 +365,9 @@ func abs(x int64) int64 {
 
 var _ NonceStore = (*memoryStore)(nil)
 
-// Memory returns an in-memory LRU+TTL [NonceStore]; capacity must be > 0.
+// Memory returns an in-memory TTL [NonceStore]; capacity must be > 0.
+// Full of live nonces it fails closed with [ErrStoreFull]: evicting a
+// live nonce would re-open its replay window.
 func Memory(capacity int) (NonceStore, error) {
 	if capacity <= 0 {
 		return nil, ErrMemoryCapacity
@@ -373,8 +378,8 @@ func Memory(capacity int) (NonceStore, error) {
 	}, nil
 }
 
-// memoryStore is a typed doubly-linked list LRU with per-entry TTL.
-// All operations are O(1) on the hot path.
+// memoryStore is a doubly-linked list with per-entry TTL. Uniform TTLs
+// keep insertion order equal to expiry order, so eviction is O(1).
 type memoryStore struct {
 	index    map[string]*memoryEntry
 	head     *memoryEntry
@@ -405,10 +410,7 @@ func (m *memoryStore) Seen(_ context.Context, nonce string, ttl time.Duration) (
 	}
 
 	if len(m.index) >= m.capacity {
-		if oldest := m.tail; oldest != nil {
-			m.removeLocked(oldest)
-			delete(m.index, oldest.nonce)
-		}
+		return false, ErrStoreFull
 	}
 
 	entry := &memoryEntry{nonce: nonce, expire: now.Add(ttl)}
@@ -446,7 +448,7 @@ func (m *memoryStore) removeLocked(e *memoryEntry) {
 }
 
 // evictExpiredLocked drops entries whose expire time is before now,
-// walking from the LRU tail. Caller holds m.mu.
+// walking from the oldest tail. Caller holds m.mu.
 func (m *memoryStore) evictExpiredLocked(now time.Time) {
 	for m.tail != nil && !m.tail.expire.After(now) {
 		dead := m.tail

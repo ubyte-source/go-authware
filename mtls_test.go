@@ -43,6 +43,13 @@ func generateTestCert(tb testing.TB, cn string) (cert *x509.Certificate, spkiPin
 
 func mtlsRequest(tb testing.TB, cert *x509.Certificate) *http.Request {
 	tb.Helper()
+	r := mtlsUnverifiedRequest(tb, cert)
+	r.TLS.VerifiedChains = [][]*x509.Certificate{{cert}}
+	return r
+}
+
+func mtlsUnverifiedRequest(tb testing.TB, cert *x509.Certificate) *http.Request {
+	tb.Helper()
 	r := newReq(tb, http.MethodGet, "/", http.NoBody)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
 	return r
@@ -93,6 +100,30 @@ func TestMTLS_AcceptsBySPKIPin(t *testing.T) {
 	}
 	if id.Subject != "pinned.example" {
 		t.Fatalf("Subject = %q", id.Subject)
+	}
+}
+
+func TestMTLS_RejectsSubjectWithoutVerifiedChain(t *testing.T) {
+	cert, _ := generateTestCert(t, testClientCN)
+	a, err := New(&Config{Mode: ModeMTLS, MTLSAllowedSubjects: []string{testClientCN}}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r := mtlsUnverifiedRequest(t, cert)
+	if _, err := a.Authenticate(r); !errors.Is(err, errMTLSRejected) {
+		t.Fatalf("err = %v, want errMTLSRejected", err)
+	}
+}
+
+func TestMTLS_AcceptsPinWithoutVerifiedChain(t *testing.T) {
+	cert, pin := generateTestCert(t, "pinned.example")
+	a, err := New(&Config{Mode: ModeMTLS, MTLSAllowedSPKIPins: [][]byte{pin[:]}}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r := mtlsUnverifiedRequest(t, cert)
+	if _, err := a.Authenticate(r); err != nil {
+		t.Fatalf("Authenticate: %v", err)
 	}
 }
 

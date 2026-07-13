@@ -27,13 +27,11 @@ func discoverOIDC(ctx context.Context, client *http.Client, issuer string) (cfg 
 	}
 	endpoint := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
 
-	//nolint:gosec // G704: endpoint derives from issuer validated by requireHTTPS above; not user-controlled.
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if reqErr != nil {
 		return nil, reqErr
 	}
 
-	//nolint:gosec // G704: request URL validated by requireHTTPS above; not user-controlled.
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

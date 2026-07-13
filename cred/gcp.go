@@ -74,7 +74,7 @@ func (g *GCPMetadata) fetchAccessToken(ctx context.Context, host string) (*Token
 	return tokenFromResponse(resp), nil
 }
 
-func (g *GCPMetadata) metadataGet(ctx context.Context, fullURL string) ([]byte, error) {
+func (g *GCPMetadata) metadataGet(ctx context.Context, fullURL string) (body []byte, err error) {
 	client := g.Client
 	if client == nil {
 		client = sharedHTTPClient
@@ -88,9 +88,9 @@ func (g *GCPMetadata) metadataGet(ctx context.Context, fullURL string) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	defer closeBody(resp.Body)
+	defer func() { err = closeBody(resp.Body, err) }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenBodyBytes))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxTokenBodyBytes))
 	if err != nil {
 		return nil, err
 	}

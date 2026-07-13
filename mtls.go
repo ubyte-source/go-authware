@@ -15,9 +15,10 @@ var (
 	errMTLSRejected = unauthorisedError("mTLS: client certificate rejected")
 )
 
-// mtlsAuthenticator authenticates inbound requests by matching the
-// verified peer certificate against an allowlist of subject CNs and/or
-// SHA-256 SubjectPublicKeyInfo pins. Comparisons are constant-time.
+// mtlsAuthenticator matches the peer certificate against subject CNs
+// and/or SHA-256 SPKI pins. Subject matching requires a TLS-verified
+// chain (any key holder can self-sign an arbitrary subject); pins bind
+// the key itself and stand alone. Pin comparisons are constant-time.
 type mtlsAuthenticator struct {
 	realm    string
 	subjects map[string]struct{}
@@ -59,14 +60,14 @@ func (a *mtlsAuthenticator) Authenticate(r *http.Request) (*Identity, error) {
 		return nil, errMTLSNoCert
 	}
 	cert := r.TLS.PeerCertificates[0]
-	if !a.accept(cert) {
+	if !a.accept(cert, len(r.TLS.VerifiedChains) > 0) {
 		return nil, errMTLSRejected
 	}
 	return &Identity{Method: ModeMTLS, Subject: cert.Subject.CommonName, PeerCert: cert}, nil
 }
 
-func (a *mtlsAuthenticator) accept(cert *x509.Certificate) bool {
-	if len(a.subjects) > 0 {
+func (a *mtlsAuthenticator) accept(cert *x509.Certificate, chainVerified bool) bool {
+	if chainVerified && len(a.subjects) > 0 {
 		if _, ok := a.subjects[cert.Subject.CommonName]; ok {
 			return true
 		}

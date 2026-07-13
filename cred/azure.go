@@ -29,7 +29,7 @@ type AzureMSI struct {
 }
 
 // Token requests an access token from IMDS for the configured resource.
-func (m *AzureMSI) Token(ctx context.Context) (*Token, error) {
+func (m *AzureMSI) Token(ctx context.Context) (tok *Token, err error) {
 	if m.Resource == "" {
 		return nil, fmt.Errorf("%w: AzureMSI requires Resource", ErrInvalidTokenResponse)
 	}
@@ -57,7 +57,7 @@ func (m *AzureMSI) Token(ctx context.Context) (*Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer closeBody(resp.Body)
+	defer func() { err = closeBody(resp.Body, err) }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenBodyBytes))
 	if err != nil {

@@ -24,7 +24,8 @@
 //
 // # Stores
 //
-// [Memory] is an in-memory LRU+TTL store suitable for single-instance
-// deployments. Larger fleets should plug in a Redis or distributed store
-// implementing [NonceStore].
+// [Memory] is an in-memory TTL store suitable for single-instance
+// deployments; when full of live nonces it fails closed with
+// [ErrStoreFull]. Larger fleets should plug in a Redis or distributed
+// store implementing [NonceStore].
 package replay

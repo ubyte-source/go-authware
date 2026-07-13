@@ -351,3 +351,39 @@ func BenchmarkClientCredentials(b *testing.B) {
 		_ = tok
 	}
 }
+
+func TestPostFormToken_RejectsPlainHTTP(t *testing.T) {
+	c := &ClientCredentials{TokenURL: testPlainHTTPURL, ClientID: testID}
+	if _, err := c.Token(context.Background()); !errors.Is(err, ErrInsecureTokenURL) {
+		t.Fatalf("err = %v, want ErrInsecureTokenURL", err)
+	}
+}
+
+func TestRequireSecureURL(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{name: "https", raw: "https://idp.example/token", wantErr: false},
+		{name: "http public", raw: "http://idp.example/token", wantErr: true},
+		{name: "http localhost", raw: "http://localhost:9/token", wantErr: false},
+		{name: "http loopback v4", raw: "http://127.0.0.1:9/token", wantErr: false},
+		{name: "http loopback v6", raw: "http://[::1]:9/token", wantErr: false},
+		{name: "ftp", raw: "ftp://idp.example/token", wantErr: true},
+		{name: "garbage", raw: "://", wantErr: true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := requireSecureURL(tt.raw)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("requireSecureURL(%q) err = %v, wantErr %v", tt.raw, err, tt.wantErr)
+			}
+			if err != nil && !errors.Is(err, ErrInsecureTokenURL) {
+				t.Fatalf("expected ErrInsecureTokenURL, got %v", err)
+			}
+		})
+	}
+}

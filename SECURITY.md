@@ -33,10 +33,12 @@ discovery, token endpoints). The threat model covers:
 
 ## Implemented Defenses
 
-- **HTTPS-only signing material.** JWKS, OIDC discovery, OAuth proxy
-  upstreams must use `https://`. Plain `http://` is accepted only for
-  loopback hosts (`localhost`, `127.0.0.1`, `::1`) so that test fixtures
-  keep working — public-host plaintext is rejected at runtime.
+- **HTTPS-only credentials in transit.** JWKS, OIDC discovery, OAuth
+  proxy upstreams and `cred` token endpoints must use `https://`. Plain
+  `http://` is accepted only for loopback hosts (`localhost`,
+  `127.0.0.1`, `::1`) so that test fixtures keep working — public-host
+  plaintext is rejected at runtime. Cloud metadata endpoints
+  (`169.254.169.254`, `metadata.google.internal`) are exempt by design.
 - **NIST SP 800-131A Rev. 2 RSA keys.** Public keys with a modulus
   shorter than 2048 bits are rejected at JWKS load. The exponent must be
   ≥ 65537.
@@ -61,7 +63,8 @@ discovery, token endpoints). The threat model covers:
   third-party dependency, fuzzed upstream).
 - **Anti-replay primitives.** The `replay` subpackage signs with
   HMAC-SHA256 and binds method, path, timestamp, and nonce; nonces are
-  replay-rejected via an LRU+TTL store.
+  replay-rejected via a TTL store that fails closed at capacity, so a
+  nonce is never evicted while its timestamp window is still open.
 
 ## Operational Limits
 

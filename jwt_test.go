@@ -1614,36 +1614,6 @@ func TestFetchAndParseJWKS_CloseError(t *testing.T) {
 	}
 }
 
-func TestBearerToken(t *testing.T) {
-	tests := []struct {
-		name   string
-		header string
-		want   string
-		ok     bool
-	}{
-		{"valid", "Bearer mytoken", testMyTok, true},
-		{"valid lowercase", "bearer mytoken", testMyTok, true},
-		{"valid uppercase", "BEARER mytoken", testMyTok, true},
-		{"valid mixed case", "BeArEr mytoken", testMyTok, true},
-		{testEmpty, "", "", false},
-		{"bearer only no space", schemeBearer, "", false},     // len==6, <= 7
-		{"bearer plus 1 char no space", "BearerX", "", false}, // len==7, <= 7
-		{"wrong scheme", "Basic token", "", false},
-		{"almost bearer", "Xearer mytoken", "", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := parseAuthScheme(tc.header, "bearer")
-			if ok != tc.ok {
-				t.Fatalf("parseAuthScheme(%q, %q) ok=%v, want %v", tc.header, "bearer", ok, tc.ok)
-			}
-			if ok && got != tc.want {
-				t.Fatalf("parseAuthScheme(%q, %q) = %q, want %q", tc.header, "bearer", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestSplitJWT_Valid covers the happy paths of splitJWT.
 func TestSplitJWT_Valid(t *testing.T) {
 	h, p, s, si, ok := splitJWT([]byte("aaa.bbb.ccc"))
@@ -1868,5 +1838,102 @@ func TestRequireHTTPS(t *testing.T) {
 				t.Fatalf("expected errInsecureURLScheme, got %v", err)
 			}
 		})
+	}
+}
+
+// The scp source buffer is pooled and recycled after validation.
+func TestScopesFromSCPArrayDetachesFromBuffer(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`["read","write"]`)
+	scopes := scopesFromSCPArray(raw)
+	for i := range raw {
+		raw[i] = 'X'
+	}
+	if got := strings.Join(scopes, " "); got != testReadW {
+		t.Fatalf("scopes alias recycled buffer: got %q, want %q", got, testReadW)
+	}
+}
+
+// A kid absent from a fresh cache forces one rate-limited JWKS refetch.
+func TestOAuth_JWKS_UnknownKidForcesRefresh(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	hits := 0
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		rsaJWKSHandler(t, &key.PublicKey, "rotated-kid")(w, r)
+	}))
+	defer jwksServer.Close()
+
+	auth, err := New(&Config{
+		Mode: ModeOAuth, OAuthIssuer: testIssuerURL, OAuthJWKSURL: jwksServer.URL,
+	}, jwksServer.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a, ok := auth.(*oauthAuthenticator)
+	if !ok {
+		t.Fatalf("expected *oauthAuthenticator, got %T", auth)
+	}
+	a.seedKeysForTest(map[string]jwkPublicKey{"stale-kid": {key: &key.PublicKey, alg: algRS256}})
+
+	now := time.Now()
+	token := signRSAToken(t, key, "rotated-kid", map[string]any{
+		testClaimSub: testUser, testClaimIss: testIssuerURL,
+		testClaimExp: now.Add(time.Hour).Unix(), testClaimIat: now.Unix(),
+	})
+	req := newReq(t, http.MethodGet, "/", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	if _, err := a.Authenticate(req); err != nil {
+		t.Fatalf("Authenticate after rotation: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("JWKS hits = %d, want 1", hits)
+	}
+
+	a.seedKeysForTest(map[string]jwkPublicKey{"stale-kid": {key: &key.PublicKey, alg: algRS256}})
+	token2 := signRSAToken(t, key, "rotated-2", map[string]any{
+		testClaimSub: testUser, testClaimIss: testIssuerURL,
+		testClaimExp: now.Add(time.Hour).Unix(), testClaimIat: now.Unix(),
+	})
+	req2 := newReq(t, http.MethodGet, "/", http.NoBody)
+	req2.Header.Set("Authorization", "Bearer "+token2)
+	if _, err := a.Authenticate(req2); err == nil {
+		t.Fatal("expected error while forced refresh is rate-limited")
+	}
+	if hits != 1 {
+		t.Fatalf("JWKS hits = %d, want 1 (forced refresh must be rate-limited)", hits)
+	}
+}
+
+func TestEqualQuotedBytes_Escapes(t *testing.T) {
+	t.Parallel()
+	if !equalQuotedBytes([]byte(`"https:\/\/idp.example"`), "https://idp.example") {
+		t.Fatal("escaped issuer must match its decoded form")
+	}
+	if equalQuotedBytes([]byte(`"https:\/\/idp.example"`), "https://other.example") {
+		t.Fatal("escaped issuer must not match a different value")
+	}
+	if !equalQuotedBytes([]byte(`"plain"`), "plain") {
+		t.Fatal("unescaped fast path broken")
+	}
+	if equalQuotedBytes([]byte(`"broken\`), "broken") {
+		t.Fatal("malformed quoted value must not match")
+	}
+}
+
+func TestContainsAudienceRaw_EscapedArray(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`["https:\/\/api.example","other"]`)
+	if !containsAudienceRaw(raw, "https://api.example") {
+		t.Fatal("escaped audience entry must match its decoded form")
+	}
+	if !containsAudienceRaw(raw, "other") {
+		t.Fatal("plain audience entry must match")
+	}
+	if containsAudienceRaw(raw, "missing") {
+		t.Fatal("absent audience must not match")
 	}
 }

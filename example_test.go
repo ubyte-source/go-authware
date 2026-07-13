@@ -74,7 +74,12 @@ func ExampleNew_mTLS() {
 		log.Fatal(err)
 	}
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
-	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	// Subject matching requires a chain verified by the TLS layer
+	// (ClientAuth: tls.RequireAndVerifyClientCert).
+	r.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{cert},
+		VerifiedChains:   [][]*x509.Certificate{{cert}},
+	}
 	id, err := auth.Authenticate(r)
 	if err != nil {
 		log.Fatal(err)

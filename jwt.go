@@ -66,6 +66,7 @@ const (
 	defaultJWTClockSkew  = 30 * time.Second
 	jwtClockSkewSec      = int64(defaultJWTClockSkew / time.Second)
 	jwksNegativeCacheTTL = 30 * time.Second
+	jwksForcedRefreshMin = 30 * time.Second
 	jwksMaxBodyBytes     = 1 << 20
 	rsaMaxModulusBits    = 8192
 
@@ -182,6 +183,7 @@ type oauthAuthenticator struct {
 	requiredScopes        []string
 	authorizationServers  []string
 	failedUntilNanos      atomic.Int64
+	forcedAtNanos         atomic.Int64
 	cacheTTL              time.Duration
 	skewSec               int64
 	refreshMu             sync.Mutex
@@ -690,8 +692,9 @@ func scopesFromSCPArray(raw []byte) []string {
 	}
 	var scopes []string
 	jsonfast.IterateStringArray(raw, func(val string) bool {
+		// val aliases the pooled decode buffer; clone before retaining.
 		if v := strings.TrimSpace(val); v != "" {
-			scopes = append(scopes, v)
+			scopes = append(scopes, strings.Clone(v))
 		}
 		return true
 	})
@@ -860,7 +863,7 @@ func (a *oauthAuthenticator) lookupKey(ctx context.Context, kid, alg string) (an
 	if key, ok := findKey(keys, kid, alg); ok {
 		return key, nil
 	}
-	keys, err = a.refreshKeys(ctx)
+	keys, err = a.forceRefreshKeys(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -905,14 +908,31 @@ func (a *oauthAuthenticator) currentKeys(ctx context.Context) (map[string]jwkPub
 	return a.refreshKeys(ctx)
 }
 
-// refreshKeys performs a single-flight JWKS refresh. The fast path
-// returns the cached snapshot via atomic load; otherwise the caller
-// joins or starts an in-flight fetch and waits on its channel without
-// holding any mutex.
+// refreshKeys returns the cached snapshot while fresh, else fetches.
 func (a *oauthAuthenticator) refreshKeys(ctx context.Context) (map[string]jwkPublicKey, error) {
 	if snap := a.keys.Load(); snap != nil && time.Now().Before(snap.expiry) {
 		return snap.keys, nil
 	}
+	return a.fetchKeys(ctx)
+}
+
+// forceRefreshKeys refetches even when the snapshot is fresh, at most
+// once per jwksForcedRefreshMin so unknown kids cannot hammer the endpoint.
+func (a *oauthAuthenticator) forceRefreshKeys(ctx context.Context) (map[string]jwkPublicKey, error) {
+	now := time.Now().UnixNano()
+	last := a.forcedAtNanos.Load()
+	if now-last < int64(jwksForcedRefreshMin) || !a.forcedAtNanos.CompareAndSwap(last, now) {
+		if snap := a.keys.Load(); snap != nil {
+			return snap.keys, nil
+		}
+		return nil, errJWKSEndpoint
+	}
+	return a.fetchKeys(ctx)
+}
+
+// fetchKeys joins or starts the single-flight fetch, honoring the
+// negative-cache backoff.
+func (a *oauthAuthenticator) fetchKeys(ctx context.Context) (map[string]jwkPublicKey, error) {
 	if backoff := a.failedUntilNanos.Load(); backoff > 0 && time.Now().UnixNano() < backoff {
 		if snap := a.keys.Load(); snap != nil {
 			return snap.keys, nil
@@ -920,8 +940,7 @@ func (a *oauthAuthenticator) refreshKeys(ctx context.Context) (map[string]jwkPub
 		return nil, errJWKSEndpoint
 	}
 
-	//nolint:contextcheck // singleflight: shared fetch uses its own timeout; caller ctx honored at the select below.
-	call := a.beginKeysFetch()
+	call := a.beginKeysFetch(ctx)
 	select {
 	case <-call.done:
 		if call.err != nil {
@@ -933,7 +952,7 @@ func (a *oauthAuthenticator) refreshKeys(ctx context.Context) (map[string]jwkPub
 	}
 }
 
-func (a *oauthAuthenticator) beginKeysFetch() *keysFetchCall {
+func (a *oauthAuthenticator) beginKeysFetch(ctx context.Context) *keysFetchCall {
 	if call := a.inflight.Load(); call != nil {
 		return call
 	}
@@ -946,12 +965,14 @@ func (a *oauthAuthenticator) beginKeysFetch() *keysFetchCall {
 	a.inflight.Store(call)
 	a.refreshMu.Unlock()
 
-	go a.runKeysFetch(call)
+	go a.runKeysFetch(ctx, call)
 	return call
 }
 
-func (a *oauthAuthenticator) runKeysFetch(call *keysFetchCall) {
-	ctx, cancel := context.WithTimeout(context.Background(), a.httpClientTimeout())
+// runKeysFetch performs the fetch shared by every waiter: detached from
+// the elected caller's cancellation, bounded by its own timeout.
+func (a *oauthAuthenticator) runKeysFetch(ctx context.Context, call *keysFetchCall) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.httpClientTimeout())
 	defer cancel()
 
 	snap, err := a.fetchKeysSnapshot(ctx)
@@ -1010,13 +1031,11 @@ func (a *oauthAuthenticator) fetchAndParseJWKS(
 		return nil, fmt.Errorf("JWKS endpoint: %w", schemeErr)
 	}
 
-	//nolint:gosec // G704: jwksURL validated by requireHTTPS above; sourced from config or trusted OIDC discovery.
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, http.NoBody)
 	if reqErr != nil {
 		return nil, reqErr
 	}
 
-	//nolint:gosec // G704: request URL validated by requireHTTPS above; not user-controlled.
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -1321,10 +1340,26 @@ func asciiEqualFoldRaw(b []byte, lower string) bool {
 }
 
 // equalQuotedBytes compares a raw JSON quoted value against an unquoted
-// string without allocating. Comparison is not constant time.
+// string, decoding escapes only when present. Not constant time.
 func equalQuotedBytes(raw []byte, s string) bool {
-	return len(raw) == len(s)+2 && raw[0] == '"' && raw[len(raw)-1] == '"' &&
-		string(raw[1:len(raw)-1]) == s
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return false
+	}
+	body := raw[1 : len(raw)-1]
+	if bytes.IndexByte(body, '\\') < 0 {
+		return string(body) == s
+	}
+	dec, ok := jsonfast.DecodeString(raw)
+	return ok && dec == s
+}
+
+// quotedBodyEquals compares a JSON string body (escapes intact) against want.
+func quotedBodyEquals(body, want string) bool {
+	if strings.IndexByte(body, '\\') < 0 {
+		return body == want
+	}
+	dec, ok := jsonfast.DecodeString([]byte(`"` + body + `"`))
+	return ok && dec == want
 }
 
 // containsAudienceRaw checks audience against a quoted string or a
@@ -1339,7 +1374,7 @@ func containsAudienceRaw(raw []byte, expected string) bool {
 	if raw[0] == '[' {
 		found := false
 		jsonfast.IterateStringArray(raw, func(val string) bool {
-			if val == expected {
+			if quotedBodyEquals(val, expected) {
 				found = true
 				return false
 			}

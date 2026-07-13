@@ -120,8 +120,7 @@ func (p *OAuthProxy) ensureFetched(ctx context.Context) (*proxyState, bool) {
 	if st := p.loadState(); st != nil {
 		return st, true
 	}
-	//nolint:contextcheck // singleflight: shared fetch uses its own timeout; caller ctx honored at the select below.
-	call := p.beginFetch()
+	call := p.beginFetch(ctx)
 	select {
 	case <-call.done:
 		return call.state, call.err == nil && call.state != nil
@@ -130,7 +129,7 @@ func (p *OAuthProxy) ensureFetched(ctx context.Context) (*proxyState, bool) {
 	}
 }
 
-func (p *OAuthProxy) beginFetch() *fetchCall {
+func (p *OAuthProxy) beginFetch(ctx context.Context) *fetchCall {
 	if call := p.inflight.Load(); call != nil {
 		return call
 	}
@@ -143,17 +142,18 @@ func (p *OAuthProxy) beginFetch() *fetchCall {
 	p.inflight.Store(call)
 	p.fetchMu.Unlock()
 
-	go p.runFetch(call)
+	go p.runFetch(ctx, call)
 	return call
 }
 
-// runFetch performs the upstream metadata fetch outside any lock.
-// Success overwrites p.state; failure leaves it nil so the next caller
-// retries. The inflight slot is cleared before close(done) so a new
-// caller after a failure starts a fresh fetch instead of re-reading
+// runFetch performs the fetch shared by every waiter: detached from the
+// elected caller's cancellation, bounded by its own timeout, outside any
+// lock. Success overwrites p.state; failure leaves it nil so the next
+// caller retries. The inflight slot is cleared before close(done) so a
+// new caller after a failure starts a fresh fetch instead of re-reading
 // the cached failure.
-func (p *OAuthProxy) runFetch(call *fetchCall) {
-	ctx, cancel := context.WithTimeout(context.Background(), p.fetchTimeout)
+func (p *OAuthProxy) runFetch(ctx context.Context, call *fetchCall) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.fetchTimeout)
 	defer cancel()
 
 	state, err := p.discoverUpstream(ctx)
@@ -596,11 +596,7 @@ func validateIssuerHost(issuer, expected string) error {
 	// A malformed expected host (e.g. an unusual server URL) is not
 	// fatal: if the authority cannot be derived, no mismatch can be
 	// proven and the document is accepted.
-	expectedHost, parseErr := schemeHost(expected)
-	if parseErr != nil {
-		return nil //nolint:nilerr // soft accept; see comment.
-	}
-	if issuerHost != expectedHost {
+	if expectedHost, parseErr := schemeHost(expected); parseErr == nil && issuerHost != expectedHost {
 		return errUpstreamHostMismatch
 	}
 	return nil

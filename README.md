@@ -92,7 +92,9 @@ Built-in predicates: `HasScope`, `HasAnyScope`, `HasAllScopes`,
 
 Omit `OAuthJWKSURL` and the library fetches
 `{issuer}/.well-known/openid-configuration` once, caching the JWKS with
-TTL and stampede-prevented refresh. Works with Google, Auth0, Keycloak,
+TTL and stampede-prevented refresh. A token carrying a `kid` absent from
+the cache forces one rate-limited refetch, so IdP key rotation is picked
+up without waiting for TTL expiry. Works with Google, Auth0, Keycloak,
 Azure AD, Okta, and any other OIDC-compliant provider.
 
 ```go
@@ -121,6 +123,10 @@ auth, _ := authware.New(&authware.Config{
 
 The verified `*x509.Certificate` is exposed as `Identity.PeerCert`. Pin
 matching uses `subtle.ConstantTimeCompare` on the SHA-256 SPKI digest.
+Subject matching requires a chain verified by the TLS layer
+(`ClientAuth: tls.RequireAndVerifyClientCert`): any key holder can
+self-sign an arbitrary subject. SPKI pins bind the key itself and also
+accept unverified chains.
 
 ### Hardening middleware
 
@@ -315,8 +321,10 @@ s := &replay.Signer{Key: sharedKey}
 client := &http.Client{Transport: cred.RoundTripper(nil, s)}
 ```
 
-`Memory` is an LRU+TTL store suitable for single-instance deployments.
-For fleets, plug in any `NonceStore` implementation (Redis, etc.).
+`Memory` is a TTL store suitable for single-instance deployments; full
+of live nonces it fails closed with `ErrStoreFull` — size its capacity
+above peak signed requests per second × twice the verifier window. For
+fleets, plug in any `NonceStore` implementation (Redis, etc.).
 
 ## Benchmarks
 
@@ -357,7 +365,7 @@ are achieved.
 
 | Benchmark    | ns/op | B/op | allocs/op | Notes |
 |--------------|------:|-----:|----------:|-------|
-| Memory.Seen  |   362 |   71 |         1 | Typed doubly-linked LRU + TTL |
+| Memory.Seen  |   362 |   71 |         1 | Typed doubly-linked TTL list |
 | Signer.Sign  |  2257 | 1538 |        20 | Pooled scratch + 3 header sets |
 | Verify.Hit   |  4334 | 2145 |        32 | Sign + Verify together |
 
