@@ -2,7 +2,7 @@ package authware
 
 import (
 	"encoding/base64"
-	"strings"
+	"net/url"
 	"testing"
 )
 
@@ -98,46 +98,51 @@ func FuzzSanitiseHeaderValue(f *testing.F) {
 	})
 }
 
-// FuzzRequireHTTPS ensures the URL scheme guard never panics and never
-// admits a non-loopback http:// origin.
+// FuzzRequireHTTPS ensures the URL scheme guard never panics and admits only
+// what the caller is allowed to fetch: https, or http to a loopback host, and
+// never credentials in the URL.
+//
+// The oracle asserts against what the HTTP client will actually do — the URL as
+// net/url parses it, the same parse http.NewRequest performs — instead of
+// re-deriving the authority by hand. An earlier hand-rolled version split
+// userinfo at the first "@" while net/url splits at the last, so it called
+// "http://@@localhost" non-loopback and flagged a guard that was reading the
+// host correctly; the real defect it pointed at was the missing userinfo
+// refusal, not the host check.
 func FuzzRequireHTTPS(f *testing.F) {
 	f.Add("https://example.com")
 	f.Add("http://localhost:8080")
 	f.Add("http://example.com")
 	f.Add("ftp://example.com")
 	f.Add("")
+	f.Add("http://@@localhost")
+	f.Add("https://user:pass@example.com")
+	f.Add("http://localhost@evil.example")
 
 	f.Fuzz(func(t *testing.T, raw string) {
 		err := requireHTTPS(raw)
-		// If the input starts with literal "http://" and the host is not
-		// loopback, the guard MUST reject. This is the security invariant.
-		const httpScheme = "http://"
-		if len(raw) > len(httpScheme) && raw[:len(httpScheme)] == httpScheme {
-			rest := raw[len(httpScheme):]
-			if !startsWithLoopback(rest) && err == nil {
-				t.Fatalf("non-loopback http:// admitted: %q", raw)
+		if err != nil {
+			return // rejecting is always allowed; the guard may be stricter
+		}
+		// Admitted: it must be a URL net/http can send, with no credentials,
+		// and either https or http to loopback.
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			t.Fatalf("admitted an unparseable URL %q: %v", raw, parseErr)
+		}
+		if u.User != nil {
+			t.Fatalf("admitted URL carrying userinfo %q: net/http would send it as Basic auth", raw)
+		}
+		switch u.Scheme {
+		case schemeHTTPS:
+		case schemeHTTP:
+			if !isLoopbackHost(u.Hostname()) {
+				t.Fatalf("admitted plaintext http to non-loopback host %q: %q", u.Hostname(), raw)
 			}
+		default:
+			t.Fatalf("admitted non-http(s) scheme %q: %q", u.Scheme, raw)
 		}
 	})
-}
-
-func startsWithLoopback(rest string) bool {
-	if at := strings.IndexAny(rest, "@/?#"); at >= 0 && rest[at] == '@' {
-		rest = rest[at+1:]
-	}
-	for _, h := range []string{"localhost", "127.0.0.1", "[::1]"} {
-		if !strings.HasPrefix(rest, h) {
-			continue
-		}
-		if len(rest) == len(h) {
-			return true
-		}
-		switch rest[len(h)] {
-		case ':', '/', '?', '#':
-			return true
-		}
-	}
-	return false
 }
 
 // FuzzAlgorithmConfusion verifies that JWT validation never accepts a

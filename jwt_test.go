@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -1805,6 +1806,14 @@ func TestOAuth_IssuerTrailingSlashInConfig(t *testing.T) {
 	}
 }
 
+// urlWithUserinfo builds a URL carrying credentials the way net/url renders
+// them, so the case reads as "whatever a client would actually send" rather
+// than as a hardcoded credential literal.
+func urlWithUserinfo(scheme, user, pass, host string) string {
+	u := url.URL{Scheme: scheme, User: url.UserPassword(user, pass), Host: host}
+	return u.String()
+}
+
 func TestRequireHTTPS(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -1825,6 +1834,19 @@ func TestRequireHTTPS(t *testing.T) {
 		{name: "file reject", raw: "file:///etc/passwd", wantErr: true},
 		{name: "empty reject", raw: "", wantErr: true},
 		{name: "no scheme reject", raw: "example.com", wantErr: true},
+		// Userinfo is refused whatever the scheme: net/http would turn it into
+		// an Authorization: Basic header aimed at whatever host follows, and
+		// several of these URLs arrive inside a fetched discovery document.
+		{name: "https userinfo reject", raw: urlWithUserinfo("https", "user", "pass", "example.com"), wantErr: true},
+		{name: "https bare user reject", raw: "https://user@example.com", wantErr: true},
+		{name: "http loopback userinfo reject", raw: urlWithUserinfo("http", "svc", "svc", "localhost:9200"), wantErr: true},
+		// net/url splits userinfo at the LAST "@", so the host here really is
+		// loopback; it is refused for the credentials, not for the host.
+		{name: "http double at reject", raw: "http://@@localhost", wantErr: true},
+		{name: "http empty userinfo reject", raw: "http://@localhost", wantErr: true},
+		// Credentials that look like a loopback host must not smuggle a remote
+		// one past the check.
+		{name: "http loopback as userinfo reject", raw: "http://localhost@evil.example", wantErr: true},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

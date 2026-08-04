@@ -286,12 +286,12 @@ func (p *OAuthProxy) ASMetadataHandler() http.HandlerFunc {
 // requestIssuer derives the issuer URL from r, preferring TLS, then
 // X-Forwarded-Proto, then http.
 func requestIssuer(r *http.Request) string {
-	scheme := "http"
+	scheme := schemeHTTP
 	switch {
 	case r.TLS != nil:
-		scheme = "https"
+		scheme = schemeHTTPS
 	default:
-		if fp := r.Header.Get("X-Forwarded-Proto"); fp == "https" || fp == "http" {
+		if fp := r.Header.Get("X-Forwarded-Proto"); fp == schemeHTTPS || fp == schemeHTTP {
 			scheme = fp
 		}
 	}

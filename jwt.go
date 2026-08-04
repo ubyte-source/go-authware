@@ -34,18 +34,37 @@ func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r, limit))
 }
 
+// URL schemes this package will fetch over.
+const (
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
+
 // requireHTTPS rejects URLs that are neither https:// nor http:// to a
 // loopback host. Plaintext delivery of signing material is an attacker-
 // controlled substitution risk under MITM.
+//
+// Userinfo is refused whatever the scheme. net/http turns it into an
+// Authorization: Basic header, so an issuer, jwks_uri or endpoint carrying
+// credentials — several of which arrive inside a fetched discovery document —
+// would make this client authenticate wherever the URL points. It is also the
+// part of the authority where parsers disagree: RFC 3986 forbids a bare "@"
+// in userinfo, net/url and WHATWG split at the LAST "@" while stricter
+// tokenisers split at the first, so "http://@@localhost" reads as loopback
+// here and as something else elsewhere. No legitimate JWKS or issuer URL
+// carries credentials; put them in a header instead.
 func requireHTTPS(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("%w: %q", errInsecureURLScheme, raw)
 	}
+	if u.User != nil {
+		return fmt.Errorf("%w: userinfo not allowed: %q", errInsecureURLScheme, raw)
+	}
 	switch u.Scheme {
-	case "https":
+	case schemeHTTPS:
 		return nil
-	case "http":
+	case schemeHTTP:
 		if isLoopbackHost(u.Hostname()) {
 			return nil
 		}
