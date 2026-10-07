@@ -1,402 +1,363 @@
 package cred
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ubyte-source/go-authware/v2/secret"
 )
 
-func TestToken_Apply_Defaults(t *testing.T) {
-	tok := &Token{Value: "abc"}
-	r := newReq(t, http.MethodGet, "/", http.NoBody)
-	tok.Apply(r)
-	if got := r.Header.Get("Authorization"); got != "Bearer abc" {
-		t.Fatalf("Authorization = %q", got)
+func TestTokenApply(t *testing.T) {
+	tests := []struct {
+		tok        *Token
+		header     string
+		wantHeader string
+	}{
+		{&Token{Value: secret.New(testPayload)}, authorization, "Bearer abc"},
+		{&Token{Value: secret.New(testPayload), Type: dpop, Header: "X-Auth"}, "X-Auth", dpopABC},
+	}
+	for _, tt := range tests {
+		r := newReq(t, http.MethodGet, testAPIURL, http.NoBody)
+		tt.tok.Apply(r)
+		bare := &http.Request{Method: http.MethodGet, URL: r.URL}
+		tt.tok.Apply(bare)
+		if got, gotBare := r.Header.Get(tt.header), bare.Header.Get(tt.header); got != tt.wantHeader ||
+			gotBare != tt.wantHeader {
+			t.Errorf("%s = %q, and %q without a header map; want %q", tt.header, got, gotBare, tt.wantHeader)
+		}
 	}
 }
 
-func TestToken_Apply_CustomTypeAndHeader(t *testing.T) {
-	tok := &Token{Value: "xyz", Type: "Basic", Header: "X-Auth"}
-	r := newReq(t, http.MethodGet, "/", http.NoBody)
-	tok.Apply(r)
-	if got := r.Header.Get("X-Auth"); got != "Basic xyz" {
-		t.Fatalf("X-Auth = %q", got)
+// TestTokenShared renders the header value and the canonical header name of a
+// copy once.
+func TestTokenShared(t *testing.T) {
+	tok := &Token{Value: secret.New(testPayload), Type: dpop, Header: "x-api-key"}
+	shared := tok.shared()
+	if shared == tok || !tok.rendered.IsZero() || tok.canonicalHeader != "" || shared.rendered.Reveal() != dpopABC ||
+		shared.canonicalHeader != "X-Api-Key" {
+		t.Fatalf("shared = %p rendering %q in %q, want a copy of %p rendering DPoP abc in X-Api-Key", shared,
+			shared.rendered.Reveal(), shared.canonicalHeader, tok)
 	}
-	if got := r.Header.Get("Authorization"); got != "" {
-		t.Fatalf("Authorization should be empty, got %q", got)
+	if def := (&Token{Value: tok.Value}).shared(); def.canonicalHeader != authorization {
+		t.Fatalf("shared without Header names %q, want Authorization", def.canonicalHeader)
+	}
+}
+
+// TestTokenSharedCopy applies, from a copy of a shared token, edited or not,
+// the header value and name of the copy.
+func TestTokenSharedCopy(t *testing.T) {
+	shared := (&Token{Value: secret.New(testPayload), Type: dpop, Header: "x-api-key"}).shared()
+	for name, edit := range map[string]func(*Token){
+		"none":      func(*Token) {},
+		"value":     func(c *Token) { c.Value = secret.New("xyz") },
+		"type":      func(c *Token) { c.Type = "Toke" },
+		"separator": func(c *Token) { c.Type, c.Value = "DPo", secret.New(" abc") },
+		"header":    func(c *Token) { c.Header = "x-other" },
+	} {
+		c := *shared
+		edit(&c)
+		r := &http.Request{}
+		c.Apply(r)
+		key, want := http.CanonicalHeaderKey(c.Header), c.Type+" "+c.Value.Reveal()
+		if got := r.Header[key]; len(r.Header) != 1 || len(got) != 1 || got[0] != want {
+			t.Errorf("Apply after a %s edit set %q, want %s: %q: a stale rendering is ignored", name, r.Header, key,
+				want)
+		}
+	}
+}
+
+// TestTokenApplyAllocs renders the header value of a fixed token on each
+// call and reuses the value and the canonical name of a shared token, whatever
+// the case of its Header; the header slice is allocated.
+func TestTokenApplyAllocs(t *testing.T) {
+	plain := &Token{Value: secret.New(strings.Repeat("a", longToken))}
+	lower := &Token{Value: plain.Value, Header: "x-api-key"}
+	want := "Bearer " + plain.Value.Reveal()
+	for _, tc := range []struct {
+		tok    *Token
+		header string
+		allocs float64
+	}{{plain, authorization, 2}, {plain.shared(), authorization, 1}, {lower.shared(), "X-Api-Key", 1}} {
+		r := newReq(t, http.MethodGet, testAPIURL, http.NoBody)
+		assertAllocs(t, tc.allocs, func() { tc.tok.Apply(r) })
+		if got := r.Header[tc.header]; len(got) != 1 || got[0] != want {
+			t.Fatalf("Apply set %s to %.20q, want Bearer and the token", tc.header, got)
+		}
+	}
+}
+
+func TestTokenApplyBare(t *testing.T) {
+	for _, header := range []string{"", customHeader} {
+		tok := &Token{Value: secret.New("k v"), Header: header, Bare: true}
+		for _, apply := range []*Token{tok, tok.shared()} {
+			r := newReq(t, http.MethodGet, testAPIURL, http.NoBody)
+			apply.Apply(r)
+			if got := r.Header.Get(cmp.Or(header, authorization)); got != "k v" {
+				t.Errorf("Apply of a bare token in %q wrote %q, want the value alone", header, got)
+			}
+		}
+	}
+}
+
+func TestTokenSign(t *testing.T) {
+	var s Signer = &Token{Value: secret.New("k"), Type: "Token", Header: customHeader}
+	r := newReq(t, http.MethodGet, testAPIURL, http.NoBody)
+	if err := s.Sign(t.Context(), r); err != nil || r.Header.Get(customHeader) != "Token k" {
+		t.Fatalf("Sign() = %v, %s %q, want Token k", err, customHeader, r.Header.Get(customHeader))
+	}
+}
+
+func TestTokenValidate(t *testing.T) {
+	ok := []*Token{
+		{Value: secret.New(testPayload)},
+		{Value: secret.New("a b\tc"), Type: "Token", Header: customHeader},
+		{Value: secret.New(testPayload), Header: customHeader, Bare: true},
+	}
+	for _, tok := range ok {
+		if err := tok.Validate(); err != nil {
+			t.Errorf("Validate(%+v) = %v, want nil", tok, err)
+		}
+	}
+	bad := []struct {
+		tok  *Token
+		want string
+	}{
+		{&Token{Value: secret.New(testPayload), Header: "X Key"}, `token header "X Key"`},
+		{&Token{Value: secret.New(testPayload), Type: spacedScheme}, `token type "Be arer" is not a valid scheme`},
+		{&Token{Value: secret.New(testPayload), Type: "Bearer", Bare: true},
+			`token type "Bearer" is set on a bare token`},
+		{&Token{}, "token value"},
+		{&Token{Value: secret.New("abc\n")}, "token value"},
+		{&Token{Value: secret.New("a\x00b")}, "token value"},
+	}
+	for _, tc := range bad {
+		if err := tc.tok.Validate(); !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Validate(%+v) = %v, want ErrInvalidConfig with %q", tc.tok, err, tc.want)
+		}
+	}
+}
+
+// TestTokenValidateNil reports a nil token as every sibling Validate reports a
+// nil config.
+func TestTokenValidateNil(t *testing.T) {
+	var none *Token
+	if err := none.Validate(); !errors.Is(err, ErrInvalidConfig) || err.Error() != "cred: invalid config: nil token" {
+		t.Fatalf("(*Token)(nil).Validate() = %v, want ErrInvalidConfig: nil token", err)
+	}
+}
+
+// TestTokenValidateJoined reports every problem of a token at once, without
+// its value.
+func TestTokenValidateJoined(t *testing.T) {
+	err := (&Token{Value: secret.New("s3cr3t\n"), Header: "X Key", Type: spacedScheme}).Validate()
+	if !errors.Is(err, ErrInvalidConfig) || strings.Count(err.Error(), newline) != 2 ||
+		strings.Contains(err.Error(), "s3cr3t") {
+		t.Fatalf("err = %q, want three joined ErrInvalidConfig problems without the value", err)
+	}
+}
+
+// TestTokenValidateBareType refuses a type on a bare token, and also as a
+// scheme when it is not a token.
+func TestTokenValidateBareType(t *testing.T) {
+	err := (&Token{Value: secret.New(testPayload), Type: spacedScheme, Bare: true}).Validate()
+	const want = `cred: invalid config: token type "Be arer" is set on a bare token` + newline +
+		`cred: invalid config: token type "Be arer" is not a valid scheme`
+	if !errors.Is(err, ErrInvalidConfig) || err.Error() != want {
+		t.Fatalf("err = %q, want %q", err, want)
+	}
+}
+
+// TestTokenSharedHidesTheCredential prints a shared token, whose header value is
+// rendered, without its credential.
+func TestTokenSharedHidesTheCredential(t *testing.T) {
+	tok := (&Token{Value: secret.New("s3cr3t-token"), Type: dpop}).shared()
+	if out := fmt.Sprintf("%v %+v %#v %v", tok, tok, tok, *tok); strings.Contains(out, "s3cr3t") {
+		t.Fatalf("fmt output = %s, want no s3cr3t", out)
+	}
+}
+
+func TestTokenLogValue(t *testing.T) {
+	exp, err := time.Parse(time.RFC3339, "2030-01-02T03:04:05Z")
+	if err != nil {
+		t.Fatalf("Parse(expiry) = %v, want nil", err)
+	}
+	tok := &Token{Value: secret.New("s3cr3t-token"), Type: "Bearer", Expires: exp}
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).LogAttrs(t.Context(), slog.LevelInfo, "m", slog.Any("tok", tok))
+	fmt.Fprintf(&buf, "%v %+v %#v", tok, tok, tok)
+	out := buf.String()
+	if strings.Contains(out, "s3cr3t") {
+		t.Fatalf("log and fmt output = %s, want no s3cr3t", out)
+	}
+	if !strings.Contains(out, `"tok":{"type":"Bearer","expires":"2030-01-02T03:04:05Z"}`) {
+		t.Fatalf("log record = %s, want the type and expiry group", out)
 	}
 }
 
 func TestTokenSourceFunc(t *testing.T) {
-	var called bool
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		called = true
-		return &Token{Value: "v"}, nil
-	})
-	if _, err := src.Token(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !called {
-		t.Fatal("func not called")
+	want := &Token{Value: secret.New("x")}
+	got, err := TokenSourceFunc(func(context.Context) (*Token, error) { return want, nil }).Token(t.Context())
+	if err != nil || got != want {
+		t.Fatalf("Token = %v, %v, want %v", got, err, want)
 	}
 }
 
 func TestSignerFunc(t *testing.T) {
-	var called bool
-	s := SignerFunc(func(_ context.Context, r *http.Request) error {
-		called = true
-		r.Header.Set("X-Sig", "ok")
+	r := newReq(t, http.MethodGet, testAPIURL, http.NoBody)
+	err := SignerFunc(func(_ context.Context, r *http.Request) error {
+		r.Header.Set("X-Signed", "1")
 		return nil
+	}).Sign(t.Context(), r)
+	if err != nil || r.Header.Get("X-Signed") != "1" {
+		t.Fatalf("Sign = %v with X-Signed %q, want nil and 1", err, r.Header.Get("X-Signed"))
+	}
+}
+
+// TestSignerFuncPassesTheContext calls the function with the context Sign gets.
+func TestSignerFuncPassesTheContext(t *testing.T) {
+	r := newReq(t, http.MethodGet, testAPIURL, http.NoBody)
+	got := false
+	err := SignerFunc(func(ctx context.Context, _ *http.Request) error {
+		got = isMarked(ctx)
+		return nil
+	}).Sign(marked(t), r)
+	if err != nil || !got {
+		t.Fatalf("Sign = %v with the caller's context passed %t, want nil and true", err, got)
+	}
+}
+
+// TestAsSignerPassesTheContext asks the source for a token under the context
+// Sign gets.
+func TestAsSignerPassesTheContext(t *testing.T) {
+	got := false
+	src := TokenSourceFunc(func(ctx context.Context) (*Token, error) {
+		got = isMarked(ctx)
+		return &Token{Value: secret.New(seq1)}, nil
 	})
-	r := newReq(t, http.MethodGet, "/", http.NoBody)
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	if !called || r.Header.Get("X-Sig") != "ok" {
-		t.Fatalf("not signed: called=%v sig=%q", called, r.Header.Get("X-Sig"))
+	if err := AsSigner(src).Sign(marked(t), newReq(t, http.MethodGet, testAPIURL, http.NoBody)); err != nil || !got {
+		t.Fatalf("Sign = %v with the caller's context passed %t, want nil and true", err, got)
 	}
 }
 
-func TestAsSigner_AppliesToken(t *testing.T) {
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		return &Token{Value: "abc"}, nil
-	})
-	r := newReq(t, http.MethodGet, "/", http.NoBody)
-	if err := AsSigner(src).Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	if got := r.Header.Get("Authorization"); got != "Bearer abc" {
-		t.Fatalf("Authorization = %q", got)
-	}
-}
-
-func TestAsSigner_PropagatesError(t *testing.T) {
-	want := errors.New("boom")
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) { return nil, want })
-	err := AsSigner(src).Sign(context.Background(), newReq(t, http.MethodGet, "/", http.NoBody))
-	if !errors.Is(err, want) {
-		t.Fatalf("err = %v, want %v", err, want)
+func TestAsSigner(t *testing.T) {
+	r := newReq(t, http.MethodGet, testAPIURL, http.NoBody)
+	bare := &http.Request{Method: http.MethodGet, URL: r.URL}
+	for _, req := range []*http.Request{r, bare} {
+		if err := AsSigner(&sequence{}).Sign(t.Context(), req); err != nil {
+			t.Fatalf("Sign = %v, want nil", err)
+		}
+		if got := req.Header.Get(authorization); got != bearerSeq1 {
+			t.Fatalf("Authorization = %q, want %q", got, bearerSeq1)
+		}
 	}
 }
 
-// recordingTransport stores the request it sees and returns a 204.
-type recordingTransport struct {
-	seen *http.Request
-}
-
-func (t *recordingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	t.seen = r
-	return &http.Response{
-		StatusCode: http.StatusNoContent,
-		Body:       io.NopCloser(strings.NewReader("")),
-		Header:     http.Header{},
-	}, nil
-}
-
-func TestRoundTripper_Signs(t *testing.T) {
-	rec := &recordingTransport{}
-	rt := RoundTripper(rec, AsSigner(TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		return &Token{Value: "ok"}, nil
-	})))
-	req := newReq(t, http.MethodGet, "https://example.com/", http.NoBody)
-	resp, err := rt.RoundTrip(req)
+// TestAsSignerAllocs signs with a cached token: the header value comes
+// rendered from the cache, and the header slice is the one allocation.
+func TestAsSignerAllocs(t *testing.T) {
+	c, err := NewCachedSource(&sequence{ttl: time.Hour})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf(wantCache, err)
 	}
-	if closeErr := resp.Body.Close(); closeErr != nil {
-		t.Fatalf("close: %v", closeErr)
-	}
-	if got := rec.seen.Header.Get("Authorization"); got != "Bearer ok" {
-		t.Fatalf("Authorization = %q", got)
-	}
+	s := AsSigner(c)
+	r := newReq(t, http.MethodGet, testAPIURL, http.NoBody)
+	assertAllocs(t, 1, func() {
+		if err := s.Sign(t.Context(), r); err != nil || r.Header.Get(authorization) != bearerSeq1 {
+			t.Fatalf("Sign = %v with %q, want nil and %s", err, r.Header.Get(authorization), bearerSeq1)
+		}
+	})
 }
 
-func TestRoundTripper_NoMutateOriginal(t *testing.T) {
-	rec := &recordingTransport{}
-	rt := RoundTripper(rec, AsSigner(TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		return &Token{Value: "ok"}, nil
-	})))
-	req := newReq(t, http.MethodGet, "https://example.com/", http.NoBody)
-	resp, err := rt.RoundTrip(req)
+func BenchmarkAsSigner(b *testing.B) {
+	c, err := NewCachedSource(&sequence{ttl: time.Hour})
 	if err != nil {
-		t.Fatal(err)
+		b.Fatalf(wantCache, err)
 	}
-	if closeErr := resp.Body.Close(); closeErr != nil {
-		t.Fatalf("close: %v", closeErr)
+	s := AsSigner(c)
+	r := newReq(b, http.MethodGet, testAPIURL, http.NoBody)
+	if err := s.Sign(b.Context(), r); err != nil || r.Header.Get(authorization) != bearerSeq1 {
+		b.Fatalf("Sign = %v with %q, want nil and %s", err, r.Header.Get(authorization), bearerSeq1)
 	}
-	if got := req.Header.Get("Authorization"); got != "" {
-		t.Fatalf("original mutated: Authorization = %q", got)
-	}
-}
-
-func TestRoundTripper_PropagatesSignerError(t *testing.T) {
-	want := errors.New("signer broken")
-	rt := RoundTripper(&recordingTransport{}, SignerFunc(func(_ context.Context, _ *http.Request) error {
-		return want
-	}))
-	resp, err := rt.RoundTrip(newReq(t, http.MethodGet, "/", http.NoBody))
-	if resp != nil {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			t.Errorf("close: %v", closeErr)
-		}
-		t.Fatalf("expected nil response on error, got %v", resp)
-	}
-	if !errors.Is(err, want) {
-		t.Fatalf("err = %v, want %v", err, want)
-	}
-}
-
-func TestRoundTripper_NilBaseUsesDefault(t *testing.T) {
-	rt := RoundTripper(nil, SignerFunc(func(_ context.Context, _ *http.Request) error { return nil }))
-	if rt == nil {
-		t.Fatal("expected non-nil RoundTripper")
-	}
-}
-
-func TestCache_PanicOnNilSource(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic")
-		}
-	}()
-	_ = Cache(nil)
-}
-
-func TestCache_ServesFreshFromUpstream(t *testing.T) {
-	calls := 0
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		calls++
-		return &Token{Value: "v", Expires: time.Now().Add(time.Hour)}, nil
-	})
-	c := Cache(src)
-	tok, err := c.Token(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tok.Value != "v" {
-		t.Fatalf("Value = %q", tok.Value)
-	}
-	if calls != 1 {
-		t.Fatalf("calls = %d", calls)
-	}
-}
-
-func TestCache_ReusesUntilSkew(t *testing.T) {
-	calls := 0
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		calls++
-		return &Token{Value: "v", Expires: time.Unix(1000, 0)}, nil
-	})
-	clock := time.Unix(0, 0)
-	c := Cache(src, WithSkew(10*time.Second), WithClock(func() time.Time { return clock }))
-
-	for range 5 {
-		if _, err := c.Token(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if calls != 1 {
-		t.Fatalf("expected single upstream call, got %d", calls)
-	}
-}
-
-func TestCache_RefreshesNearExpiry(t *testing.T) {
-	calls := atomic.Int64{}
-	clock := time.Unix(0, 0)
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		calls.Add(1)
-		return &Token{Value: "v", Expires: clock.Add(1000 * time.Second)}, nil
-	})
-	c := Cache(src, WithSkew(60*time.Second), WithClock(func() time.Time { return clock }))
-
-	if _, err := c.Token(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	// First token expires at +1000s. With skew=60s the cache treats it as
-	// stale once clock crosses +940s; move past that and force a refresh.
-	clock = time.Unix(950, 0)
-	if _, err := c.Token(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("calls = %d, want 2", got)
-	}
-}
-
-func TestCache_NoExpiryNeverRefreshes(t *testing.T) {
-	calls := 0
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		calls++
-		return &Token{Value: "v"}, nil
-	})
-	c := Cache(src)
-	for range 100 {
-		if _, err := c.Token(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if calls != 1 {
-		t.Fatalf("calls = %d, want 1", calls)
-	}
-}
-
-func TestCache_PropagatesError(t *testing.T) {
-	want := errors.New("upstream down")
-	c := Cache(TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		return nil, want
-	}))
-	_, err := c.Token(context.Background())
-	if !errors.Is(err, want) {
-		t.Fatalf("err = %v, want %v", err, want)
-	}
-}
-
-func TestCache_DoesNotStoreOnError(t *testing.T) {
-	failures := atomic.Int64{}
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		if failures.Add(1) <= 1 {
-			return nil, errors.New("transient")
-		}
-		return &Token{Value: "v", Expires: time.Now().Add(time.Hour)}, nil
-	})
-	c := Cache(src)
-	if _, err := c.Token(context.Background()); err == nil {
-		t.Fatal("expected first call to fail")
-	}
-	tok, err := c.Token(context.Background())
-	if err != nil {
-		t.Fatalf("expected second call to succeed: %v", err)
-	}
-	if tok.Value != "v" {
-		t.Fatalf("Value = %q", tok.Value)
-	}
-}
-
-// TestCache_Stampede verifies that under heavy concurrent load only one
-// upstream refresh is issued per refresh window (manual singleflight).
-func TestCache_Stampede(t *testing.T) {
-	calls := atomic.Int64{}
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		calls.Add(1)
-		// Hold the slot long enough for sibling goroutines to pile up.
-		time.Sleep(20 * time.Millisecond)
-		return &Token{Value: "v", Expires: time.Now().Add(time.Hour)}, nil
-	})
-	c := Cache(src)
-
-	const N = 100
-	var wg sync.WaitGroup
-	wg.Add(N)
-	start := make(chan struct{})
-	for range N {
-		go func() {
-			defer wg.Done()
-			<-start
-			if _, err := c.Token(context.Background()); err != nil {
-				t.Errorf("Token: %v", err)
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		own := r.Clone(r.Context())
+		for pb.Next() {
+			if err := s.Sign(own.Context(), own); err != nil {
+				b.Errorf("Sign = %v, want nil", err)
+				return
 			}
-		}()
-	}
-	close(start)
-	wg.Wait()
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("upstream calls = %d, want 1", got)
-	}
-}
-
-func TestCache_RespectsContextCancellation(t *testing.T) {
-	leaderStarted := make(chan struct{})
-	leaderRelease := make(chan struct{})
-	src := TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		close(leaderStarted)
-		<-leaderRelease
-		return &Token{Value: "v", Expires: time.Now().Add(time.Hour)}, nil
+		}
 	})
-	c := Cache(src)
-
-	// Leader: a long-running call.
-	leaderDone := make(chan struct{})
-	go func() {
-		defer close(leaderDone)
-		if _, err := c.Token(context.Background()); err != nil {
-			t.Errorf("leader: %v", err)
-		}
-	}()
-	<-leaderStarted
-
-	// Waiter: a cancelable call that should bail early.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := c.Token(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("waiter err = %v, want context.Canceled", err)
-	}
-	close(leaderRelease)
-	<-leaderDone
 }
 
-// BenchmarkCache_Hit measures the steady-state hit path. Target: 0 alloc.
-func BenchmarkCache_Hit(b *testing.B) {
-	c := Cache(TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		return &Token{Value: "v", Expires: time.Now().Add(time.Hour)}, nil
-	}))
-	if _, err := c.Token(context.Background()); err != nil {
-		b.Fatal(err)
-	}
-	ctx := context.Background()
-	b.ReportAllocs()
-
-	for b.Loop() {
-		if _, err := c.Token(ctx); err != nil {
-			b.Fatal(err)
+func TestAsSignerErrors(t *testing.T) {
+	var calls atomic.Int32
+	failing := &sequence{}
+	failing.fail(errSource)
+	unsaved := fmt.Errorf("%w: %w", ErrRotationNotSaved, errStore)
+	for _, tc := range []struct {
+		name string
+		src  TokenSource
+		want error
+	}{
+		{"failure", failing, errSource},
+		{"no token", nilSource{}, ErrNoToken},
+		{"unsaved rotation", tokenWithError(&calls, unsaved), ErrRotationNotSaved},
+	} {
+		r := newReq(t, http.MethodGet, testAPIURL, http.NoBody)
+		err := AsSigner(tc.src).Sign(t.Context(), r)
+		if !errors.Is(err, ErrCredential) || !errors.Is(err, tc.want) || r.Header.Get(authorization) != "" {
+			t.Errorf("%s: err = %v, Authorization %q; want ErrCredential wrapping %v and no header",
+				tc.name, err, r.Header.Get(authorization), tc.want)
 		}
 	}
 }
 
-// BenchmarkToken_Apply measures the per-request header attach.
-func BenchmarkToken_Apply(b *testing.B) {
-	tok := &Token{Value: "supersecrettoken"}
-	r := newReq(b, http.MethodGet, "/", http.NoBody)
-	b.ReportAllocs()
+func TestFetchToken(t *testing.T) {
+	tok, err := fetchToken(t.Context(), &sequence{})
+	if err != nil || tok.Value.Reveal() != seq1 {
+		t.Fatalf("fetchToken = %v, %v, want %s", tok, err, seq1)
+	}
+	if tok, err := fetchToken(t.Context(), nilSource{}); tok != nil || !errors.Is(err, ErrNoToken) {
+		t.Fatalf("nil token = %v, %v, want ErrNoToken", tok, err)
+	}
+	var calls atomic.Int32
+	if tok, err := fetchToken(t.Context(), tokenWithError(&calls, errSource)); tok != nil || !errors.Is(err,
+		errSource) {
+		t.Fatalf("token with an error = %v, %v, want no token and errSource", tok, err)
+	}
+}
 
+func TestCredentialError(t *testing.T) {
+	once := credentialError(io.EOF)
+	if !errors.Is(once, ErrCredential) || !errors.Is(once, io.EOF) {
+		t.Fatalf("credentialError(EOF) = %v, want ErrCredential wrapping io.EOF", once)
+	}
+	if twice := credentialError(once); strings.Count(twice.Error(), ErrCredential.Error()) != 1 {
+		t.Fatalf("credentialError(wrapped) = %v, want ErrCredential once", twice)
+	}
+}
+
+func BenchmarkTokenApply(b *testing.B) {
+	jwt := strings.Repeat("a", longToken)
+	tok := &Token{Value: secret.New(jwt)}
+	r := newReq(b, http.MethodGet, testAPIURL, http.NoBody)
+	tok.Apply(r)
+	if got := r.Header.Get(authorization); got != "Bearer "+jwt {
+		b.Fatalf("Authorization = %.20q, want Bearer and the 1.5 KiB token", got)
+	}
+	b.ReportAllocs()
 	for b.Loop() {
 		tok.Apply(r)
 	}
-}
-
-// BenchmarkRoundTripper measures the signing overhead added by the
-// RoundTripper wrapper. The base transport is a no-op stub.
-func BenchmarkRoundTripper(b *testing.B) {
-	stub := &nopTransport{}
-	rt := RoundTripper(stub, AsSigner(TokenSourceFunc(func(_ context.Context) (*Token, error) {
-		return &Token{Value: "v"}, nil
-	})))
-	req := newReq(b, http.MethodGet, "https://example.com/", http.NoBody)
-	b.ReportAllocs()
-
-	for b.Loop() {
-		resp, err := rt.RoundTrip(req)
-		if err != nil {
-			b.Fatal(err)
-		}
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			b.Fatal(closeErr)
-		}
-	}
-}
-
-// nopTransport returns an empty 204 response without touching the network.
-type nopTransport struct{}
-
-func (n *nopTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
-	return &http.Response{
-		StatusCode: http.StatusNoContent,
-		Body:       http.NoBody,
-		Header:     http.Header{},
-	}, nil
 }

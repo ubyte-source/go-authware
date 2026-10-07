@@ -1,118 +1,166 @@
 package cred
 
 import (
+	"cmp"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"time"
+
+	"github.com/ubyte-source/go-authware/v2/internal/problems"
 )
 
-// ErrEmptyCAFile is returned when the CA file contains no PEM
-// certificates.
-var ErrEmptyCAFile = errors.New("cred/mtls: CA file contains no certificates")
-
-// LoadClientTLS reads the certificate, key and optional CA bundle and
-// returns a *tls.Config for outbound mTLS. An empty caFile leaves the
-// system roots in place.
-func LoadClientTLS(certFile, keyFile, caFile string) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load keypair: %w", err)
-	}
-	cfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}
-	if caFile != "" {
-		pool, err := loadCAPool(caFile)
-		if err != nil {
-			return nil, err
-		}
-		cfg.RootCAs = pool
-	}
-	return cfg, nil
+// ClientTLSConfig configures LoadClientTLS.
+type ClientTLSConfig struct {
+	// ErrorLog receives, at warn level, every failed reload of the key pair;
+	// nil logs nothing.
+	ErrorLog *slog.Logger
+	// CertFile holds the PEM certificate chain the client presents; required.
+	CertFile string
+	// KeyFile holds the PEM private key of CertFile; required.
+	KeyFile string
+	// CAFile, when not empty, holds the PEM certificates that alone are
+	// trusted as roots; it is read at filepath.Clean(CAFile).
+	CAFile string
+	// Interval, when positive, reads the key pair again during the first
+	// handshake after each interval; zero loads it once.
+	Interval time.Duration
 }
 
-// ReloadingClientTLS returns a *tls.Config that re-reads certFile and
-// keyFile every interval on demand. The first read is lazy. caFile,
-// when non-empty, is read once at construction time. No background
-// goroutine is created.
-func ReloadingClientTLS(certFile, keyFile, caFile string, interval time.Duration) (*tls.Config, error) {
-	if interval <= 0 {
-		return nil, errors.New("cred/mtls: reload interval must be > 0")
+// Validate reports, joined, every problem LoadClientTLS refuses c for, reading
+// the files to find them; each wraps ErrInvalidConfig, a key pair that cannot be
+// loaded also ErrInvalidKeyPair and a CA file without a certificate ErrEmptyCAFile.
+func (c *ClientTLSConfig) Validate() error {
+	if c == nil {
+		return errNilConfig
 	}
-	r := &certReloader{certFile: certFile, keyFile: keyFile, interval: interval}
-	if _, err := r.load(); err != nil {
-		return nil, err
-	}
-	cfg := &tls.Config{
-		MinVersion:           tls.VersionTLS12,
-		GetClientCertificate: r.getClientCertificate,
-	}
-	if caFile != "" {
-		pool, err := loadCAPool(caFile)
-		if err != nil {
-			return nil, err
-		}
-		cfg.RootCAs = pool
-	}
-	return cfg, nil
+	_, _, err := c.load()
+	return err
 }
 
-// loadCAPool reads a PEM bundle into a *x509.CertPool. Returns
-// ErrEmptyCAFile when no certificates are found.
-func loadCAPool(caFile string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(filepath.Clean(caFile))
-	if err != nil {
-		return nil, fmt.Errorf("read CA file: %w", err)
+// load reads the key pair and, when a CA file is set, the roots of c, or
+// reports every problem Validate reports.
+func (c *ClientTLSConfig) load() (tls.Certificate, *x509.CertPool, error) {
+	p := problems.New(ErrInvalidConfig)
+	p.NonNegative("reload interval", c.Interval)
+	cert, err := loadKeyPair(c.CertFile, c.KeyFile)
+	p.Add(err)
+	var roots *x509.CertPool
+	if c.CAFile != "" {
+		roots, err = loadRoots(c.CAFile)
+		p.Add(err)
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, ErrEmptyCAFile
+	if err := p.Err(); err != nil {
+		return tls.Certificate{}, nil, err
 	}
-	return pool, nil
+	return cert, roots, nil
 }
 
-// certReloader holds the most-recently-loaded certificate and its
-// load time. Reads are lock-free via atomic.Pointer; concurrent
-// refreshes are tolerated (last write wins).
+// loadedCert is a key pair and the instant it is due for reload.
+type loadedCert struct {
+	cert *tls.Certificate
+	due  time.Time
+}
+
+// certReloader serves the published pair: a reload publishes the pair it reads,
+// and a failed one publishes the pair it found again only while that pair is
+// still the published one.
 type certReloader struct {
-	current  atomic.Pointer[reloaderEntry]
+	log      *slog.Logger
 	certFile string
 	keyFile  string
 	interval time.Duration
+	pair     atomic.Pointer[loadedCert]
 }
 
-type reloaderEntry struct {
-	loadedAt time.Time
-	cert     tls.Certificate
+// clientCertificate serves the current pair, reloaded first once it is due;
+// the next interval starts when the reload ends.
+func (r *certReloader) clientCertificate(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	return r.serve(info.Context(), r.pair.Load()), nil
 }
 
-func (r *certReloader) load() (*reloaderEntry, error) {
-	cert, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
+// serve returns the pair of loaded, the one clientCertificate found, until it
+// is due, and then the pair a reload reads, or after a failed reload the
+// published one.
+func (r *certReloader) serve(ctx context.Context, loaded *loadedCert) *tls.Certificate {
+	if time.Now().Before(loaded.due) {
+		return loaded.cert
+	}
+	if cert := r.reload(ctx); cert != nil {
+		r.pair.Store(&loadedCert{cert: cert, due: time.Now().Add(r.interval)})
+		return cert
+	}
+	r.pair.CompareAndSwap(loaded, &loadedCert{cert: loaded.cert, due: time.Now().Add(r.interval)})
+	return r.pair.Load().cert
+}
+
+// reload reads the key pair again, or logs why it cannot and returns nil.
+func (r *certReloader) reload(ctx context.Context) *tls.Certificate {
+	cert, err := loadKeyPair(r.certFile, r.keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("reload keypair: %w", err)
+		r.log.LogAttrs(ctx, slog.LevelWarn, errPrefix+"key pair reload failed", slog.Any("error", err))
+		return nil
 	}
-	entry := &reloaderEntry{cert: cert, loadedAt: time.Now()}
-	r.current.Store(entry)
-	return entry, nil
+	return &cert
 }
 
-func (r *certReloader) getClientCertificate(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
-	entry := r.current.Load()
-	if entry == nil || time.Since(entry.loadedAt) >= r.interval {
-		fresh, err := r.load()
-		if err != nil {
-			if entry != nil {
-				return &entry.cert, nil
-			}
-			return nil, err
-		}
-		entry = fresh
+// LoadClientTLS returns a client TLS config presenting the key pair of cfg, loaded
+// before it returns, or an error wrapping ErrInvalidConfig; with an Interval, a
+// failed reload keeps the previous pair for another interval.
+func LoadClientTLS(cfg *ClientTLSConfig) (*tls.Config, error) {
+	if cfg == nil {
+		return nil, errNilConfig
 	}
-	return &entry.cert, nil
+	cert, roots, err := cfg.load()
+	if err != nil {
+		return nil, err
+	}
+	out := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	if cfg.Interval == 0 {
+		out.Certificates = []tls.Certificate{cert}
+		return out, nil
+	}
+	out.GetClientCertificate = newCertReloader(cfg, &cert).clientCertificate
+	return out, nil
+}
+
+// newCertReloader returns the reloader of cfg serving cert for a first
+// interval; failed reloads go to cfg.ErrorLog, or nowhere without one.
+func newCertReloader(cfg *ClientTLSConfig, cert *tls.Certificate) *certReloader {
+	r := &certReloader{
+		log:      cmp.Or(cfg.ErrorLog, slog.New(slog.DiscardHandler)),
+		certFile: cfg.CertFile,
+		keyFile:  cfg.KeyFile,
+		interval: cfg.Interval,
+	}
+	r.pair.Store(&loadedCert{cert: cert, due: time.Now().Add(cfg.Interval)})
+	return r
+}
+
+// loadKeyPair loads the PEM key pair of certFile and keyFile; a failure wraps
+// ErrInvalidKeyPair.
+func loadKeyPair(certFile, keyFile string) (tls.Certificate, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("%w: %w", ErrInvalidKeyPair, err)
+	}
+	return cert, nil
+}
+
+// loadRoots reads the PEM certificates of caFile into a pool.
+func loadRoots(caFile string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(filepath.Clean(caFile))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read CA file: %w", ErrInvalidConfig, err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pem) {
+		return nil, ErrEmptyCAFile
+	}
+	return roots, nil
 }

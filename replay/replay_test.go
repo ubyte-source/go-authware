@@ -1,497 +1,328 @@
 package replay
 
 import (
+	"bufio"
 	"bytes"
-	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"net/url"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
+	"testing/iotest"
+	"unicode/utf8"
+
+	"github.com/ubyte-source/go-authware/v2/secret"
 )
 
-// goodKey is a 32-byte fixture used by every test. Real deployments must
-// supply an unguessable secret.
-var goodKey = bytes.Repeat([]byte{0x42}, 32)
+// prefix is the text the append tests append to.
+const prefix = "x"
 
-func newSigner(t *testing.T) *Signer {
-	t.Helper()
-	return &Signer{Key: goodKey}
+func TestErrRejected(t *testing.T) {
+	t.Parallel()
+	for _, err := range []error{
+		ErrMissingHeaders, ErrMalformedHeaders, ErrTimestampSkew,
+		ErrInvalidBody, ErrInvalidSignature, ErrNonceReplayed,
+	} {
+		if !errors.Is(err, ErrRejected) {
+			t.Errorf("errors.Is(%v, ErrRejected) = false, want true", err)
+		}
+	}
+	for _, err := range []error{ErrShortKey, ErrInvalidOption, errNilStore, ErrInvalidCapacity} {
+		if !errors.Is(err, ErrInvalidConfig) || errors.Is(err, ErrRejected) ||
+			!strings.HasPrefix(err.Error(), "replay: invalid config: ") {
+			t.Errorf("%v: want ErrInvalidConfig alone, named by replay", err)
+		}
+	}
+	if errors.Is(ErrStoreFull, ErrRejected) || errors.Is(ErrStoreFull, ErrInvalidConfig) {
+		t.Errorf("%v wraps ErrRejected or ErrInvalidConfig, want neither", ErrStoreFull)
+	}
 }
 
-func newVerifier() *Verifier {
-	store, err := Memory(64)
+func TestNewMACScratch(t *testing.T) {
+	t.Parallel()
+	if _, err := newMACScratch(secret.New(testKeyRaw[1:])); !errors.Is(err, ErrShortKey) {
+		t.Fatalf("31-byte key: err = %v, want ErrShortKey", err)
+	}
+	if _, err := newMACScratch(secret.Value{}); !errors.Is(err, ErrShortKey) {
+		t.Fatalf("empty key: err = %v, want ErrShortKey", err)
+	}
+	k, err := newMACScratch(testKey())
 	if err != nil {
-		panic(err)
+		t.Fatalf("newMACScratch(32-byte key) = %v, want a MAC", err)
 	}
-	return &Verifier{Key: goodKey, Window: time.Minute, NonceStore: store}
-}
-
-func mustRequest(tb testing.TB, method, urlStr string) *http.Request {
-	tb.Helper()
-	return newHTTPReq(tb, method, urlStr, http.NoBody)
-}
-
-func TestSignVerify_RoundTrip(t *testing.T) {
-	s := newSigner(t)
-	v := newVerifier()
-	r := mustRequest(t, http.MethodGet, "https://api.example/path")
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatalf("Sign: %v", err)
-	}
-	if err := v.Verify(context.Background(), r); err != nil {
-		t.Fatalf("Verify: %v", err)
+	mac := hmac.New(sha256.New, []byte(testKeyRaw))
+	_, _ = mac.Write([]byte("data"))
+	if got := k.keyed.Sum(nil, []byte("data")); !hmac.Equal(got, mac.Sum(nil)) {
+		t.Fatalf("MAC of data = %x, want the HMAC-SHA256 of the key", got)
 	}
 }
 
-func TestVerify_Replay(t *testing.T) {
-	s := newSigner(t)
-	v := newVerifier()
-	r := mustRequest(t, http.MethodGet, "https://api.example/path")
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	if err := v.Verify(context.Background(), r); err != nil {
-		t.Fatalf("first Verify: %v", err)
-	}
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrNonceReplayed) {
-		t.Fatalf("second Verify err = %v, want ErrNonceReplayed", err)
-	}
-}
-
-func TestVerify_MissingHeaders(t *testing.T) {
-	v := newVerifier()
-	r := mustRequest(t, http.MethodGet, "/")
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrMissingHeaders) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestVerify_BadTimestamp(t *testing.T) {
-	v := newVerifier()
-	r := mustRequest(t, http.MethodGet, "/")
-	r.Header.Set(HeaderTimestamp, "not-a-number")
-	r.Header.Set(HeaderNonce, strings.Repeat("a", hexNonceLen))
-	r.Header.Set(HeaderSignature, "deadbeef")
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrMissingHeaders) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestVerify_NonceLengthRejected(t *testing.T) {
-	v := newVerifier()
-	r := mustRequest(t, http.MethodGet, "/")
-	r.Header.Set(HeaderTimestamp, strconv.FormatInt(time.Now().Unix(), 10))
-	r.Header.Set(HeaderNonce, "short")
-	r.Header.Set(HeaderSignature, "x")
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrMissingHeaders) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestVerify_SkewBackward(t *testing.T) {
-	v := newVerifier()
-	v.Now = func() time.Time { return time.Unix(10000, 0) }
-	s := &Signer{Key: goodKey, Now: func() time.Time { return time.Unix(0, 0) }}
-	r := mustRequest(t, http.MethodGet, "/path")
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrTimestampSkew) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestVerify_SkewForward(t *testing.T) {
-	v := newVerifier()
-	v.Now = func() time.Time { return time.Unix(0, 0) }
-	s := &Signer{Key: goodKey, Now: func() time.Time { return time.Unix(10000, 0) }}
-	r := mustRequest(t, http.MethodGet, "/path")
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrTimestampSkew) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestVerify_SignatureMismatch(t *testing.T) {
-	s := newSigner(t)
-	v := newVerifier()
-	r := mustRequest(t, http.MethodGet, "/path")
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	// Flip one byte of the signature.
-	sig := r.Header.Get(HeaderSignature)
-	flipped := flipFirstHexDigit(sig)
-	r.Header.Set(HeaderSignature, flipped)
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrSignatureInvalid) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestVerify_PathChangeBreaksSignature(t *testing.T) {
-	s := newSigner(t)
-	v := newVerifier()
-	r := mustRequest(t, http.MethodGet, "/original")
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	// Mutate the URL after signing — the signature must no longer verify.
-	r.URL.Path = "/tampered"
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrSignatureInvalid) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestSign_RejectsShortKey(t *testing.T) {
-	s := &Signer{Key: []byte("short")}
-	r := mustRequest(t, http.MethodGet, "/")
-	if err := s.Sign(context.Background(), r); !errors.Is(err, ErrShortKey) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestVerify_RejectsShortKey(t *testing.T) {
-	v := &Verifier{Key: []byte("short")}
-	r := mustRequest(t, http.MethodGet, "/")
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrShortKey) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestMiddleware_AllowsValid(t *testing.T) {
-	s := newSigner(t)
-	v := newVerifier()
-	called := false
-	h := Middleware(v)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	r := mustRequest(t, http.MethodGet, "/api")
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, r)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	if !called {
-		t.Fatal("inner handler not called")
-	}
-}
-
-func TestMiddleware_RejectsMissingHeaders(t *testing.T) {
-	v := newVerifier()
-	h := Middleware(v)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Error("inner handler should not be called")
-	}))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, mustRequest(t, http.MethodGet, "/api"))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d", rec.Code)
-	}
-}
-
-func TestMemory_FirstSeenIsFresh(t *testing.T) {
-	m, mErr := Memory(8)
-	if mErr != nil {
-		t.Fatal(mErr)
-	}
-	seen, err := m.Seen(context.Background(), "n1", time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if seen {
-		t.Fatal("first sighting should report seen=false")
-	}
-}
-
-func TestMemory_DuplicateIsSeen(t *testing.T) {
-	m, mErr := Memory(8)
-	if mErr != nil {
-		t.Fatal(mErr)
-	}
-	if _, err := m.Seen(context.Background(), "n1", time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	seen, err := m.Seen(context.Background(), "n1", time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !seen {
-		t.Fatal("duplicate sighting should report seen=true")
-	}
-}
-
-func TestMemory_Expiry(t *testing.T) {
-	m, mErr := Memory(8)
-	if mErr != nil {
-		t.Fatal(mErr)
-	}
-	if _, err := m.Seen(context.Background(), "n1", time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(5 * time.Millisecond)
-	seen, err := m.Seen(context.Background(), "n1", time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if seen {
-		t.Fatal("expired entry should report seen=false")
-	}
-}
-
-func TestMemory_FullOfLiveNoncesFailsClosed(t *testing.T) {
-	m, mErr := Memory(2)
-	if mErr != nil {
-		t.Fatal(mErr)
-	}
-	if _, err := m.Seen(context.Background(), "a", time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.Seen(context.Background(), "b", time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.Seen(context.Background(), "c", time.Hour); !errors.Is(err, ErrStoreFull) {
-		t.Fatalf("err = %v, want ErrStoreFull", err)
-	}
-	// Live nonces must survive the rejected insert.
-	seen, err := m.Seen(context.Background(), "a", time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !seen {
-		t.Fatal("live entry must not be evicted by an insert at capacity")
-	}
-}
-
-func TestMemory_ExpiredEntriesFreeCapacity(t *testing.T) {
-	m, mErr := Memory(2)
-	if mErr != nil {
-		t.Fatal(mErr)
-	}
-	if _, err := m.Seen(context.Background(), "a", time.Nanosecond); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.Seen(context.Background(), "b", time.Nanosecond); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(time.Millisecond)
-	if _, err := m.Seen(context.Background(), "c", time.Hour); err != nil {
-		t.Fatalf("expired entries should free capacity, got %v", err)
-	}
-}
-
-// A replay at the exact edge of the timestamp window must still find
-// the nonce in the store.
-func TestVerify_BoundaryReplayRejected(t *testing.T) {
-	s := newSigner(t)
-	v := newVerifier()
-	r := mustRequest(t, http.MethodGet, "https://api.example/path")
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	if err := v.Verify(context.Background(), r); err != nil {
-		t.Fatalf("first Verify: %v", err)
-	}
-	ts, err := strconv.ParseInt(r.Header.Get(HeaderTimestamp), 10, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	v.Now = func() time.Time { return time.Unix(ts, 0).Add(v.Window) }
-	if err := v.Verify(context.Background(), r); !errors.Is(err, ErrNonceReplayed) {
-		t.Fatalf("err = %v, want ErrNonceReplayed", err)
-	}
-}
-
-func TestMemory_RejectsZeroCapacity(t *testing.T) {
-	if _, err := Memory(0); !errors.Is(err, ErrMemoryCapacity) {
-		t.Fatalf("Memory(0) err = %v, want %v", err, ErrMemoryCapacity)
-	}
-}
-
-func TestMemory_ConcurrentSafe(t *testing.T) {
-	m, mErr := Memory(64)
-	if mErr != nil {
-		t.Fatal(mErr)
-	}
-	var wg sync.WaitGroup
-	const goroutines = 32
-	wg.Add(goroutines)
-	for i := range goroutines {
-		go func(idx int) {
-			defer wg.Done()
-			nonce := strconv.Itoa(idx)
-			if _, err := m.Seen(context.Background(), nonce, time.Minute); err != nil {
-				t.Errorf("Seen: %v", err)
-			}
-		}(i)
-	}
-	wg.Wait()
-}
-
-func TestVerifier_DefaultStoreInstalled(t *testing.T) {
-	v := &Verifier{Key: goodKey, Window: time.Minute}
-	s := newSigner(t)
-	r := mustRequest(t, http.MethodGet, "/")
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	if err := v.Verify(context.Background(), r); err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
-	if v.NonceStore == nil {
-		t.Fatal("expected default NonceStore to be installed")
-	}
-}
-
-func TestVerifier_DefaultWindow(t *testing.T) {
-	v := &Verifier{Key: goodKey}
-	if got := v.window(); got != defaultWindow {
-		t.Fatalf("window = %v", got)
-	}
-}
-
-func TestAbs(t *testing.T) {
-	cases := []struct {
-		want int64
-		in   int64
-	}{{5, 5}, {5, -5}, {0, 0}}
-	for _, tc := range cases {
-		if got := abs(tc.in); got != tc.want {
-			t.Errorf("abs(%d) = %d", tc.in, got)
+func TestMACScratchPut(t *testing.T) {
+	t.Parallel()
+	var k macScratch
+	const pooledCap = 4 << 10
+	for size, kept := range map[int]bool{pooledCap: true, pooledCap + 1: false} {
+		st := &macState{buf: make([]byte, 0, size)}
+		k.put(st)
+		if (cap(st.buf) == size) != kept {
+			t.Errorf("put(state with a %d-byte buffer) left %d bytes, want the buffer kept %t", size, cap(st.buf), kept)
 		}
 	}
 }
 
-func flipFirstHexDigit(s string) string {
-	if s == "" {
-		return s
+// TestMACScratchKeyedSum signs the canonical input of a request with a body: the
+// lines of input, then the timestamp and the nonce.
+func TestMACScratchKeyedSum(t *testing.T) {
+	t.Parallel()
+	k, err := newMACScratch(testKey())
+	if err != nil {
+		t.Fatalf("newMACScratch = %v, want a MAC", err)
 	}
-	b := []byte(s)
-	switch b[0] {
-	case '0':
-		b[0] = '1'
-	default:
-		b[0] = '0'
+	r := newRequest(t, http.MethodPost, "https://API.Example:8443/a%20b/c?x=%2F", "")
+	st := k.get()
+	defer k.put(st)
+	body := sha256.Sum256([]byte(`{"a":1}`))
+	input := append(st.input(r, &body), "1700000000\n000102030405060708090a0b0c0d0e0f"...)
+	wantInput := "POST\napi.example:8443\n/a%20b/c?x=%2F\n" +
+		"015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862\n" +
+		"1700000000\n000102030405060708090a0b0c0d0e0f"
+	if string(input) != wantInput {
+		t.Fatalf("input = %q, want %q", input, wantInput)
 	}
-	return string(b)
-}
-
-// stubReader returns deterministic bytes for nonce tests.
-type stubReader struct {
-	calls atomic.Int64
-}
-
-func (s *stubReader) Read(p []byte) (int, error) {
-	for i := range p {
-		p[i] = byte(s.calls.Add(1) & 0xff)
-	}
-	return len(p), nil
-}
-
-func TestSigner_DeterministicWithStubRand(t *testing.T) {
-	r := mustRequest(t, http.MethodGet, "/x")
-	s := &Signer{
-		Key:  goodKey,
-		Now:  func() time.Time { return time.Unix(1000, 0) },
-		Rand: &stubReader{},
-	}
-	if err := s.Sign(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	if got := r.Header.Get(HeaderTimestamp); got != "1000" {
-		t.Fatalf("timestamp = %q", got)
-	}
-	if got := len(r.Header.Get(HeaderNonce)); got != hexNonceLen {
-		t.Fatalf("nonce len = %d", got)
+	const wantSig = "dd9afc784100a61e9ec23c1b5e78f794975ffe1dcb70aa082f9545bb3fd08442"
+	if sig := hex.EncodeToString(k.keyedSum(st, input)); sig != wantSig {
+		t.Fatalf("sig = %s, want %s", sig, wantSig)
 	}
 }
 
-// FuzzVerify exercises the Verify path with arbitrary header inputs to
-// surface panics and unexpected error categories.
-func FuzzVerify(f *testing.F) {
-	f.Add("", "", "")
-	f.Add("not-a-number", "abcdef", "deadbeef")
-	f.Add("1700000000", strings.Repeat("a", hexNonceLen), strings.Repeat("0", 64))
-	f.Add(strings.Repeat("9", 30), "", "")
+// TestHasBody decides which requests carry a body as the package comment states:
+// none with a nil Body or http.NoBody, nor a server request whose ContentLength is 0.
+func TestHasBody(t *testing.T) {
+	t.Parallel()
+	server := func(body io.Reader) *http.Request {
+		return httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/p", body)
+	}
+	for _, tc := range []struct {
+		name string
+		r    *http.Request
+		want bool
+	}{
+		{"client, nil Body", &http.Request{}, false},
+		{"client, http.NoBody", &http.Request{Body: http.NoBody}, false},
+		{"client, Body of unknown length", &http.Request{Body: io.NopCloser(strings.NewReader(oneByte))}, true},
+		{"client, Body of length 1", &http.Request{Body: io.NopCloser(strings.NewReader(oneByte)), ContentLength: 1},
+			true},
+		{"server, http.NoBody", server(nil), false},
+		{"server, ContentLength 0", server(strings.NewReader("")), false},
+		{"server, unknown length", server(iotest.OneByteReader(strings.NewReader(oneByte))), true},
+		{"server, ContentLength 1", server(strings.NewReader(oneByte)), true},
+	} {
+		if got := hasBody(tc.r); got != tc.want {
+			t.Errorf("package comment: \"a request has no body when its Body is nil or http.NoBody, or when it is "+
+				"a server request, RequestURI set, whose ContentLength is 0\": %s (RequestURI %q, ContentLength %d): "+
+				"hasBody = %t, want %t", tc.name, tc.r.RequestURI, tc.r.ContentLength, got, tc.want)
+		}
+	}
+}
 
-	v := newVerifier()
-	f.Fuzz(func(t *testing.T, ts, nonce, sig string) {
-		r := mustRequest(t, http.MethodGet, "/x")
-		r.Header.Set(HeaderTimestamp, ts)
-		r.Header.Set(HeaderNonce, nonce)
-		r.Header.Set(HeaderSignature, sig)
-		err := v.Verify(context.Background(), r)
-		if err == nil {
+// TestMACStateInputDefaults builds the input of a request without a method,
+// Host or body: it names GET, the URL host and the SHA-256 of an empty body.
+func TestMACStateInputDefaults(t *testing.T) {
+	t.Parallel()
+	r := newRequest(t, http.MethodGet, "https://URL.example/", "")
+	r.Method, r.Host = "", ""
+	var st macState
+	empty := sha256.Sum256(nil)
+	if got, want := string(st.input(r, nil)), "GET\nurl.example\n/\n"+hex.EncodeToString(empty[:])+"\n"; got != want {
+		t.Fatalf("input = %q, want %q", got, want)
+	}
+	r.Method, r.Host = http.MethodDelete, "Header.example"
+	if got, want := string(st.input(r, nil)), "DELETE\nheader.example\n/\n"; !strings.HasPrefix(got, want) {
+		t.Fatalf("input = %q, want it to start with %q", got, want)
+	}
+}
+
+// wireHost returns the Host a server reads from a request net/http writes for
+// host, and false when net/http refuses to write it.
+func wireHost(host string) (string, bool) {
+	r := &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "http", Host: host, Path: "/"}, Host: host}
+	var wire bytes.Buffer
+	if r.Write(&wire) != nil {
+		return "", false
+	}
+	got, err := http.ReadRequest(bufio.NewReader(&wire))
+	if err != nil {
+		return "", false
+	}
+	return got.Host, true
+}
+
+// TestAppendHost appends the host net/http sends for a host, lowercased: an
+// IPv6 literal loses its zone, the last "%" before the last "]".
+func TestAppendHost(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{
+		"API.Example:8443", "a.example:", "[FE80::1%eth0]:8080", "[fe80::1%en0]", "[::1]:80", "[a%b%c]:1",
+		"[a%b]%c", "[%]", "[fe80::1%en0", "x%y", "x%y]:80", "[]", "",
+	} {
+		wire, ok := wireHost(host)
+		if !ok {
+			t.Fatalf("net/http refused the host %q, want it written", host)
+		}
+		if got, want := string(appendHost([]byte(prefix), host)), prefix+strings.ToLower(wire); got != want {
+			t.Errorf("appendHost(%q) = %q, want %q, the host net/http sends lowercased", host, got, want)
+		}
+	}
+}
+
+// FuzzAppendHost checks appendHost against the reference for every host, and
+// against the host net/http sends for every valid ASCII host: net/http sends an
+// invalid one empty.
+func FuzzAppendHost(f *testing.F) {
+	for _, seed := range []string{
+		"a.example:80", "[fe80::1%en0]:80", "[a%b%c]:1", "[a%b]%c", "[x", "x%y]:80", "a b", "[\xff%\n]",
+		"AZ@[`{.Example",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, host string) {
+		got := string(appendHost(nil, host))
+		if want := referenceHost(host); got != want {
+			t.Fatalf("appendHost(%q) = %q, want %q, the reference", host, got, want)
+		}
+		wire, ok := wireHost(host)
+		nonASCII := strings.ContainsFunc(host, func(c rune) bool { return c >= utf8.RuneSelf })
+		if !ok || (wire == "" && host != "") || nonASCII {
 			return
 		}
-		switch {
-		case errors.Is(err, ErrMissingHeaders):
-		case errors.Is(err, ErrTimestampSkew):
-		case errors.Is(err, ErrSignatureInvalid):
-		case errors.Is(err, ErrNonceReplayed):
-		default:
-			t.Fatalf("unexpected error category: %v", err)
+		if want := strings.ToLower(wire); got != want {
+			t.Fatalf("appendHost(%q) = %q, want %q, the host net/http sends lowercased", host, got, want)
 		}
 	})
 }
 
-// BenchmarkSigner_Sign measures signing cost on a small request.
-func BenchmarkSigner_Sign(b *testing.B) {
-	s := &Signer{Key: goodKey}
-	b.ReportAllocs()
-
-	for b.Loop() {
-		r := mustRequest(b, http.MethodGet, "/api/path")
-		if err := s.Sign(context.Background(), r); err != nil {
-			b.Fatal(err)
+func TestAppendRequestURI(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{
+		"https://a.example", "https://a.example/p?", "https://a.example/a%2Fb?x=%2F&y", "http:opaque?q", "*",
+		"https://a.example//x", "mailto:user@example.com",
+	} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("Parse(%q) = %v, want a URL", raw, err)
+		}
+		if got, want := string(appendRequestURI([]byte(prefix), u)), prefix+u.RequestURI(); got != want {
+			t.Errorf("appendRequestURI(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	for _, u := range []*url.URL{
+		{Opaque: "//host/p", Scheme: "https", RawQuery: "a=1"}, {Path: "/a b", ForceQuery: true},
+	} {
+		query, force := u.RawQuery, u.ForceQuery
+		if got, want := string(appendRequestURI(nil, u)), u.RequestURI(); got != want || u.RawQuery != query ||
+			u.ForceQuery != force {
+			t.Errorf("appendRequestURI(%#v) = %q, want %q and the URL untouched", u, got, want)
 		}
 	}
 }
 
-// BenchmarkVerify_Hit measures verification of a freshly-signed request.
-func BenchmarkVerify_Hit(b *testing.B) {
-	s := &Signer{Key: goodKey}
-	store, mErr := Memory(1 << 16)
-	if mErr != nil {
-		b.Fatal(mErr)
+func TestAppendRequestURIAllocs(t *testing.T) {
+	u, err := url.Parse("https://a.example/v1/items?page=2")
+	if err != nil {
+		t.Fatalf("Parse = %v, want a URL", err)
 	}
-	v := &Verifier{Key: goodKey, Window: time.Hour, NonceStore: store}
-	ctx := context.Background()
-	b.ReportAllocs()
+	b := make([]byte, 0, 64)
+	assertAllocs(t, 0, func() { b = appendRequestURI(b[:0], u) })
+	if string(b) != u.RequestURI() {
+		t.Fatalf("appendRequestURI = %q, want %q: the query joins in b", b, u.RequestURI())
+	}
+}
 
-	for b.Loop() {
-		r := mustRequest(b, http.MethodGet, "/api")
-		if err := s.Sign(ctx, r); err != nil {
-			b.Fatal(err)
+// BenchmarkAppendRequestURI appends the request URI of a URL with a query, and
+// the string URL.RequestURI returns for it.
+func BenchmarkAppendRequestURI(b *testing.B) {
+	u, err := url.Parse("https://a.example/v1/items?page=2")
+	if err != nil {
+		b.Fatalf("Parse = %v, want a URL", err)
+	}
+	want := u.RequestURI()
+	dst := make([]byte, 0, len(want))
+	for _, bc := range []struct {
+		name      string
+		appendURI func([]byte, *url.URL) []byte
+	}{
+		{"appendRequestURI", appendRequestURI},
+		{"URL.RequestURI", func(buf []byte, target *url.URL) []byte { return append(buf, target.RequestURI()...) }},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			if got := string(bc.appendURI(dst[:0], u)); got != want {
+				b.Fatalf("%s = %q, want %q", bc.name, got, want)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				dst = bc.appendURI(dst[:0], u)
+			}
+		})
+	}
+}
+
+// FuzzAppendRequestURI checks appendRequestURI against URL.RequestURI for
+// every URL that parses, the form of a request target included.
+func FuzzAppendRequestURI(f *testing.F) {
+	for _, seed := range []string{"https://a.example/p?q", "/p?", "http:o?q", "*", "/a%2Fb", "//h/p?x"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		for _, parse := range []func(string) (*url.URL, error){url.Parse, url.ParseRequestURI} {
+			u, err := parse(raw)
+			if err != nil {
+				continue
+			}
+			if got, want := string(appendRequestURI([]byte(prefix), u)), prefix+u.RequestURI(); got != want {
+				t.Fatalf("appendRequestURI(%q) = %q, want %q", raw, got, want)
+			}
 		}
-		if err := v.Verify(ctx, r); err != nil {
-			b.Fatal(err)
+	})
+}
+
+func TestAppendLower(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"":                 "",
+		"API.Example:8443": "api.example:8443",
+		"az@[`{ÄZ":         "az@[`{Äz",
+	} {
+		if got := string(appendLower([]byte(prefix), in)); got != prefix+want {
+			t.Errorf("appendLower(%q) = %q, want %q", in, got, prefix+want)
 		}
 	}
 }
 
-// BenchmarkMemory_Seen measures the TTL store hot path.
-func BenchmarkMemory_Seen(b *testing.B) {
-	m, mErr := Memory(1 << 16)
-	if mErr != nil {
-		b.Fatal(mErr)
-	}
-	ctx := context.Background()
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := range b.N {
-		nonce := strconv.Itoa(i)
-		if _, err := m.Seen(ctx, nonce, time.Minute); err != nil {
-			b.Fatal(err)
-		}
+// BenchmarkAppendLower appends a host with upper-case letters lowercased, and
+// the string strings.ToLower returns for it.
+func BenchmarkAppendLower(b *testing.B) {
+	const host, want = "API.Example:8443", "api.example:8443"
+	dst := make([]byte, 0, len(want))
+	for _, bc := range []struct {
+		name  string
+		lower func([]byte, string) []byte
+	}{
+		{"appendLower", appendLower},
+		{"strings.ToLower", func(buf []byte, s string) []byte { return append(buf, strings.ToLower(s)...) }},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			if got := string(bc.lower(dst[:0], host)); got != want {
+				b.Fatalf("%s = %q, want %q", bc.name, got, want)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				dst = bc.lower(dst[:0], host)
+			}
+		})
 	}
 }

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       fuzztime:
-        description: "Fuzz duration per target (e.g. 5m, 30m)"
+        description: "Fuzz duration per target, such as 5m or 30m, or a count such as 500x"
         required: false
         default: "10m"
 
@@ -14,38 +14,65 @@ permissions:
   contents: read
 
 jobs:
+  targets:
+    name: Targets
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+      fuzztime: ${{ steps.list.outputs.fuzztime }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.25.14"
+
+      - name: List the fuzz targets and check the duration
+        id: list
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '10m' }}
+        run: |
+          if [[ ! "$FUZZTIME" =~ ^[0-9]+(ms|s|m|h|x)$ ]]; then
+            echo "::error::fuzztime $FUZZTIME is neither a duration such as 10m nor a count such as 500x"
+            exit 1
+          fi
+          echo "fuzztime=$FUZZTIME" >> "$GITHUB_OUTPUT"
+          matrix=$(make -s fuzz-list)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   fuzz:
-    name: Fuzz ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    name: Fuzz ${{ matrix.pkg }}:${{ matrix.target }}
+    needs: targets
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { pkg: ., target: FuzzSplitJWT }
-          - { pkg: ., target: FuzzParseJWTHeaderDirect }
-          - { pkg: ., target: FuzzExtractClaims }
-          - { pkg: ., target: FuzzDecodeAlg }
-          - { pkg: ., target: FuzzDecodeClaimValue }
-          - { pkg: ., target: FuzzSanitiseHeaderValue }
-          - { pkg: ., target: FuzzRequireHTTPS }
-          - { pkg: ., target: FuzzAlgorithmConfusion }
-          - { pkg: ./replay, target: FuzzVerify }
+        include: ${{ fromJSON(needs.targets.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version: "1.25.14"
 
       - name: Run fuzz
-        run: go test -run=^$ -fuzz=^${{ matrix.target }}$ -fuzztime=${{ github.event.inputs.fuzztime || '10m' }} ${{ matrix.pkg }}
+        env:
+          FUZZTIME: ${{ needs.targets.outputs.fuzztime }}
+          SPEC: ${{ matrix.pkg }}:${{ matrix.target }}
+        run: make fuzz FUZZ_TARGETS="$SPEC" FUZZTIME="$FUZZTIME"
 
       - name: Upload corpus on failure
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fuzz-corpus-${{ matrix.target }}
+          name: fuzz-corpus-${{ strategy.job-index }}-${{ matrix.target }}
           path: ${{ matrix.pkg }}/testdata/fuzz/${{ matrix.target }}
           if-no-files-found: ignore

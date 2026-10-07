@@ -1,32 +1,18 @@
-// Package authware provides pluggable HTTP authentication for Go servers.
-//
-// Five mutually exclusive modes are supported: [ModeNone], [ModeBearer],
-// [ModeAPIKey], [ModeOAuth] and [ModeMTLS]. Mode selection is explicit
-// via [Config.Mode] or inferred from the populated fields.
-//
-// [Middleware] authenticates the request, stores the [Identity] in the
-// request context, and writes a WWW-Authenticate challenge on failure.
-// [RequireCapability] composes admission predicates over the stored
-// identity; [RequireScopes] is the scope-only specialisation.
-//
-// [MaxBytes] caps inbound body size, [SecurityHeaders] writes a fixed
-// pre-computed set of response headers, [CSRF] is a thin wrapper over
-// [net/http.CrossOriginProtection]. [NewRedactor] wraps a slog handler
-// to redact sensitive attribute values; [RedactHeader] does the same
-// in-place on an [net/http.Header].
-//
-// JWT validation auto-discovers the JWKS endpoint from the issuer when
-// [Config.OAuthJWKSURL] is empty.
-//
-// [AuthCheckHandler] is an [net/http.Handler] compatible with the nginx
-// auth_request module: on success it sets X-Auth-Subject, X-Auth-Method
-// and X-Auth-Scopes response headers.
-//
-// [OAuthProxy] bridges clients that require Dynamic Client Registration
-// with upstream IdPs where the application client is pre-registered
-// out-of-band. It exposes [OAuthProxy.ASMetadataHandler],
-// [OAuthProxy.AuthorizeHandler], [OAuthProxy.RegisterHandler] and
-// [OAuthProxy.TokenHandler].
-//
-// [ConfigFromEnv] builds a [Config] from AUTH_* environment variables.
+// Package authware authenticates HTTP requests for Go servers. A [Gate] built by
+// [New] from a [Config], or from the environment through [ConfigFromEnv],
+// enforces exactly one explicit [Mode]: [ModeNone] admits everyone, [ModeBearer]
+// and [ModeAPIKey] compare a shared secret, [ModeOAuth] verifies JWT access tokens
+// from an issuer, and [ModeMTLS] checks the client certificate. The Gate stores
+// the caller's [Identity] in the request context, guards handlers with
+// [Capability] checks and serves the OAuth metadata and authorization server
+// facade, while [SecurityHeaders] and [NewRedactor] harden handlers and keep
+// credentials out of logs. Only New builds a usable Gate. A Gate and an Identity
+// are safe for concurrent use, and a zero Identity, like a nil one, has no
+// subject, mode, scope, certificate or claim. The zero value of each config
+// struct holds no setting, and its methods only read it, so it is safe for
+// concurrent use while nothing modifies it; New copies its Config, using as it
+// is only the logger it names, and a copy of the client that follows no redirect
+// and bounds its timeout. Arguments of pointer, interface and function types,
+// handlers and contexts included, must not be nil, in the functions the package
+// returns too, unless a godoc says what nil means.
 package authware

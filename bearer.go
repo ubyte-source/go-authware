@@ -1,32 +1,28 @@
 package authware
 
-import "net/http"
+import (
+	"strings"
 
-var _ Authenticator = (*bearerAuthenticator)(nil)
+	"github.com/ubyte-source/go-authware/v2/internal/problems"
+	"github.com/ubyte-source/go-authware/v2/internal/syntax"
+	"github.com/ubyte-source/go-authware/v2/secret"
+)
 
-var bearerIdentity = &Identity{Method: ModeBearer, Subject: "static-bearer"}
-
-var errInvalidBearerToken = unauthorisedError("invalid bearer token")
-
-type bearerAuthenticator struct {
-	realm string
-	token string
+// BearerConfig configures ModeBearer.
+type BearerConfig struct {
+	// Token (AUTH_BEARER_TOKEN) is the shared bearer token: at least 32 bytes of
+	// a header value without space or tab.
+	Token secret.Value
 }
 
-func (a *bearerAuthenticator) Authenticate(r *http.Request) (*Identity, error) {
-	v := r.Header["Authorization"]
-	if len(v) == 0 {
-		return nil, errInvalidBearerToken
+// inUse reports whether the bearer token is set.
+func (b *BearerConfig) inUse() bool { return !b.Token.IsZero() }
+
+// validate requires a bearer token long enough and sendable after the scheme.
+func (b *BearerConfig) validate(p *problems.List) {
+	token := b.Token.Reveal()
+	sendable := syntax.IsFieldValue(token) && !strings.ContainsAny(token, " \t")
+	if longEnough(p, "bearer token", b.Token) && !sendable {
+		p.Addf("bearer token is not a header value without space or tab")
 	}
-	token, ok := parseAuthScheme(v[0], "bearer")
-	if !ok || !secureEqual(token, a.token) {
-		return nil, errInvalidBearerToken
-	}
-	return bearerIdentity, nil
 }
-
-func (a *bearerAuthenticator) Challenge(err error, resourceMetadataURL string) (status int, header, message string) {
-	return challengeFromError(a.realm, err, resourceMetadataURL)
-}
-
-func (*bearerAuthenticator) Metadata(_ string) *ProtectedResourceMetadata { return nil }

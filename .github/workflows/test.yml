@@ -11,44 +11,39 @@ permissions:
 jobs:
   test:
     name: Test (Go ${{ matrix.go }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         go:
-          - "1.25"
-          - "stable"
+          - "1.25.14"
+          - "1.27.1"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
 
       - name: Verify dependencies
-        run: |
-          go mod verify
-          go mod download
+        run: make modcheck
 
-      - name: Check go mod tidy
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum
+      - name: Run the tests without the race detector
+        run: make test
 
-      - name: Build
-        run: go build ./...
+      - name: Run the tests with the race detector and coverage
+        run: make cover
 
-      - name: Run tests
-        run: go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
-
-      - name: Coverage summary
-        run: go tool cover -func=coverage.out | tail -1
+      - name: Run every benchmark 100 times
+        run: make bench-smoke
 
       - name: Upload coverage
-        if: matrix.go == 'stable'
-        uses: codecov/codecov-action@v6
+        if: matrix.go == '1.27.1'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage.out
           fail_ci_if_error: false

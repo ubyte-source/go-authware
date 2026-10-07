@@ -1,15 +1,9 @@
-// Package secret provides a small interface for fetching credentials
-// from a backing store plus three built-in providers (Static, Env,
-// File) and a per-tenant Resolver.
-//
-// The package intentionally bundles no adapters for external secret
-// stores; each is a thin wrapper around [Provider] kept in the
-// consumer's binary, leaving go-authware dependency-free.
-//
-//   - [Static] returns secrets from an in-memory map.
-//   - [Env] reads from environment variables under a configurable prefix.
-//   - [File] reads a flat JSON object once at construction.
-//   - [MapResolver] picks a provider per tenant with an optional fallback.
-//
-// [ErrSecretNotFound] is returned when a key is missing.
+// Package secret carries secret strings and the providers that load them: a
+// non-zero [Value] renders as *** through fmt, log/slog and the JSON and text
+// encoders, but fmt prints its type for %T and the address it holds for %p, %w and
+// in an unexported field; [Value.Reveal] alone reads it back and [Value.Equal]
+// compares in constant time, while [Static], [Env], [File] and [MapResolver] build
+// the [Provider] and [Resolver] that resolve keys to Values, a missing key or an
+// empty value yielding [ErrNotFound]. Every Provider and Resolver of the package
+// is safe for concurrent use.
 package secret

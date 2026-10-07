@@ -1,14 +1,14 @@
 version: "2"
 
 run:
-  timeout: 30m
   tests: true
-  go: "1.25"
+  go: "1.25.1"
 
 linters:
   default: none
   enable:
     - asasalint
+    - asciicheck
     - bidichk
     - bodyclose
     - canonicalheader
@@ -16,35 +16,54 @@ linters:
     - contextcheck
     - copyloopvar
     - cyclop
+    - depguard
+    - dogsled
     - dupl
+    - dupword
     - durationcheck
+    - embeddedstructfieldcheck
+    - err113
     - errcheck
     - errchkjson
     - errname
     - errorlint
+    - exhaustive
     - exptostd
     - fatcontext
     - forbidigo
     - forcetypeassert
+    - funcorder
     - funlen
     - gocheckcompilerdirectives
+    - gochecknoglobals
+    - gochecknoinits
     - gocognit
     - goconst
     - gocritic
     - gocyclo
+    - godoclint
+    - godot
+    - godox
     - gomoddirectives
     - gomodguard_v2
     - goprintffuncname
     - gosec
     - govet
+    - inamedparam
     - ineffassign
+    - interfacebloat
     - intrange
     - iotamixing
     - lll
+    - loggercheck
+    - maintidx
     - makezero
     - mirror
     - misspell
+    - mnd
     - modernize
+    - musttag
+    - nakedret
     - nestif
     - nilerr
     - nilnesserr
@@ -59,11 +78,15 @@ linters:
     - recvcheck
     - revive
     - staticcheck
+    - testableexamples
     - thelper
     - unconvert
+    - unparam
     - unused
     - usestdlibvars
     - wastedassign
+    - whitespace
+    - wrapcheck
     - testifylint
     - tparallel
     - usetesting
@@ -77,9 +100,14 @@ linters:
       confidence: low
     govet:
       enable-all: true
+      # Structs group semantically related fields; fieldalignment would force
+      # pointer-first ordering and scatter every topic across size classes.
+      disable:
+        - fieldalignment
     staticcheck:
       checks: ["all"]
     revive:
+      enable-all-rules: true
       severity: warning
       rules:
         - name: exported
@@ -107,6 +135,35 @@ linters:
         - name: redefines-builtin-id
         - name: bool-literal-in-expr
         - name: constant-logical-expr
+        - name: add-constant
+          arguments:
+            - maxLitCount: "3"
+              allowStrs: '""'
+              allowInts: "0,1,2"
+              allowFloats: "0.0,0.,1.0,1.,2.0,2."
+              ignoreFuncs: "os\\.*,fmt\\.Println,make"
+        - name: cognitive-complexity
+          arguments: [20]
+        - name: line-length-limit
+          arguments: [120]
+        - name: cyclomatic
+          arguments: [10]
+        - name: function-length
+          arguments: [40, 65]
+        - name: enforce-switch-style
+          arguments: ["allowNoDefault"]
+        # The calls errcheck excludes by default, so both linters agree.
+        - name: unhandled-error
+          arguments:
+            - "^fmt\\.Print(f|ln)?$"
+            - "^strings\\.Builder\\.Write(Byte|Rune|String)?$"
+            - "^bytes\\.Buffer\\.Write(Byte|Rune|String)?$"
+    godot:
+      scope: declarations
+    # Named results are the house style, so a naked return anywhere is the
+    # hazard this catches; the default only looks at functions over 30 lines.
+    nakedret:
+      max-func-lines: 1
     gocyclo:
       min-complexity: 10
     gocognit:
@@ -146,6 +203,59 @@ linters:
       errorf: true
       sprintf1: true
       strconcat: true
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: github.com/stretchr/testify
+              desc: tests assert with the standard library
+        # go-authware only: production code parses JSON through go-jsonfast and
+        # stays memory safe.
+        production:
+          files:
+            - "!$test"
+          deny:
+            - pkg: encoding/json
+              desc: JSON goes through go-jsonfast
+            - pkg: unsafe
+              desc: production code stays memory safe
+    exhaustive:
+      default-signifies-exhaustive: true
+    gomodguard_v2:
+      # go-authware only: go-jsonfast is its one dependency.
+      allowed:
+        - module: github.com/ubyte-source/go-jsonfast
+      blocked:
+        - module: github.com/stretchr/testify
+          match-type: prefix
+          reason: tests assert with the standard library only
+        - module: gotest.tools
+          match-type: prefix
+          reason: tests assert with the standard library only
+        - module: github.com/onsi/gomega
+          reason: tests assert with the standard library only
+        - module: github.com/onsi/ginkgo
+          match-type: prefix
+          reason: tests assert with the standard library only
+        - module: github.com/matryer/is
+          reason: tests assert with the standard library only
+    sloglint:
+      no-global: all
+      context: scope
+      attr-only: true
+      key-naming-case: snake
+      forbidden-keys:
+        - err
+    # Errors of go-authware's internal packages carry their context, and a type
+    # that decorates one of these interfaces returns its delegate's errors as
+    # they are.
+    wrapcheck:
+      ignore-package-globs:
+        - github.com/ubyte-source/go-authware/v2/internal/*
+      extra-ignore-sigs:
+        - func (net/http.RoundTripper).RoundTrip(
+        - func (log/slog.Handler).Handle(
+        - func (github.com/ubyte-source/go-authware/v2/cred.TokenSource).Token(
 
 formatters:
   enable:

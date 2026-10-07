@@ -3,387 +3,274 @@ package cred
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/ubyte-source/go-jsonfast"
+	"github.com/ubyte-source/go-authware/v2/secret"
 )
 
-// writeJSONBody writes body as a JSON response and reports failures via tb.
-func writeJSONBody(tb testing.TB, w http.ResponseWriter, body string) {
-	tb.Helper()
-	if _, err := io.WriteString(w, body); err != nil {
-		tb.Errorf("write: %v", err)
-	}
-}
+// clientCredentialsProblems is the number of problems an empty config joins.
+const (
+	clientCredentialsProblems = 4
+)
 
-// fakeTokenServer returns an httptest.Server scripted by responder. Each
-// request body is parsed as form-encoded and passed to responder; responder
-// writes the response body and returns the desired status code.
-type tokenServerResponder func(form url.Values, w http.ResponseWriter) int
-
-func fakeTokenServer(t *testing.T, responder tokenServerResponder) *httptest.Server {
+func clientCredentialsFor(t *testing.T, tokenURL string, mutate func(*ClientCredentialsConfig)) TokenSource {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Content-Type"); got != contentTypeForm {
-			t.Errorf("Content-Type = %q, want %q", got, contentTypeForm)
-		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read body: %v", err)
-			return
-		}
-		form, err := url.ParseQuery(string(body))
-		if err != nil {
-			t.Errorf("parse form: %v", err)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		status := responder(form, w)
-		w.WriteHeader(status)
-	}))
-}
-
-func TestClientCredentials_Success(t *testing.T) {
-	srv := fakeTokenServer(t, func(form url.Values, w http.ResponseWriter) int {
-		if got := form.Get("grant_type"); got != "client_credentials" {
-			t.Errorf("grant_type = %q", got)
-		}
-		if got := form.Get("scope"); got != "read write" {
-			t.Errorf("scope = %q", got)
-		}
-		writeJSONBody(t, w, `{"access_token":"abc","token_type":"Bearer","expires_in":3600}`)
-		return http.StatusOK
-	})
-	defer srv.Close()
-
-	c := &ClientCredentials{
-		Client:       srv.Client(),
-		TokenURL:     srv.URL,
-		ClientID:     testID,
-		ClientSecret: "secret",
-		Scopes:       []string{"read", "write"},
+	cfg := &ClientCredentialsConfig{ClientConfig: ClientConfig{
+		TokenURL: tokenURL, ClientID: testClientID, ClientSecret: secret.New("s"),
+	}}
+	if mutate != nil {
+		mutate(cfg)
 	}
-	tok, err := c.Token(context.Background())
+	src, err := NewClientCredentials(cfg)
 	if err != nil {
-		t.Fatalf("Token: %v", err)
+		t.Fatalf("NewClientCredentials = %v, want a source", err)
 	}
-	if tok.Value != "abc" {
-		t.Fatalf("Value = %q", tok.Value)
-	}
-	if tok.Type != "Bearer" {
-		t.Fatalf("Type = %q", tok.Type)
-	}
-	if time.Until(tok.Expires) < time.Hour-time.Minute {
-		t.Fatalf("Expires too close: %v", tok.Expires)
-	}
+	return src
 }
 
-func TestClientCredentials_BasicAuth(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != testID || pass != "secret" {
-			t.Errorf("basic auth = (%q, %q, %v)", user, pass, ok)
+func TestNewClientCredentials(t *testing.T) {
+	if _, err := NewClientCredentials(nil); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("NewClientCredentials(nil) = %v, want ErrInvalidConfig", err)
+	}
+	plain := strings.Replace(idpEndpoint, "https", "http", 1)
+	_, err := NewClientCredentials(&ClientCredentialsConfig{ClientConfig: ClientConfig{
+		TokenURL: plain, AuthStyle: 7, Timeout: -time.Second,
+	}})
+	for _, want := range []error{ErrInsecureTokenURL, ErrInvalidConfig} {
+		if !errors.Is(err, want) {
+			t.Errorf("err = %v, want %v", err, want)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		writeJSONBody(t, w, `{"access_token":"x","token_type":"Bearer"}`)
-	}))
-	defer srv.Close()
-
-	c := &ClientCredentials{Client: srv.Client(), TokenURL: srv.URL, ClientID: testID, ClientSecret: "secret"}
-	if _, err := c.Token(context.Background()); err != nil {
-		t.Fatal(err)
+	}
+	if strings.Count(err.Error(), newline) != clientCredentialsProblems-1 {
+		t.Errorf("err = %q, want four joined problems", err)
 	}
 }
 
-func TestClientCredentials_PublicClient(t *testing.T) {
-	srv := fakeTokenServer(t, func(form url.Values, w http.ResponseWriter) int {
-		if got := form.Get("client_id"); got != "public" {
-			t.Errorf("client_id = %q", got)
-		}
-		writeJSONBody(t, w, `{"access_token":"x","token_type":"Bearer"}`)
-		return http.StatusOK
+func TestClientCredentialsConfigValidate(t *testing.T) {
+	if err := (*ClientCredentialsConfig)(nil).Validate(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("nil Validate() = %v, want ErrInvalidConfig", err)
+	}
+	cfg := &ClientCredentialsConfig{ClientConfig: ClientConfig{
+		TokenURL: idpEndpoint, ClientID: testClientID, Scopes: []string{"read"},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate = %v, want nil", err)
+	}
+	cfg.Scopes = []string{"read write"}
+	if err := cfg.Validate(); !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), `"read write"`) {
+		t.Fatalf("spaced scope Validate() = %v, want ErrInvalidConfig naming the scope", err)
+	}
+	if _, err := NewClientCredentials(cfg); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("NewClientCredentials err = %v, want the Validate problem", err)
+	}
+}
+
+func TestClientCredentialsToken(t *testing.T) {
+	rec := newRecording(t, answer(http.StatusOK, okToken))
+	src := clientCredentialsFor(t, rec.srv.URL, func(c *ClientCredentialsConfig) {
+		c.ClientID, c.ClientSecret = "tenant:app", secret.New("p+s%&w")
+		c.Scopes, c.Audience = []string{"read", "write"}, "api"
 	})
-	defer srv.Close()
-
-	c := &ClientCredentials{Client: srv.Client(), TokenURL: srv.URL, ClientID: "public"}
-	if _, err := c.Token(context.Background()); err != nil {
-		t.Fatal(err)
+	before := time.Now()
+	tok := nextToken(t, src)
+	after := time.Now()
+	if tok.Value.Reveal() != wantAccess || tok.Type != "Bearer" {
+		t.Fatalf("token = %q %q, want Bearer %s", tok.Type, tok.Value.Reveal(), wantAccess)
+	}
+	if tok.Expires.Before(before.Add(time.Hour)) || tok.Expires.After(after.Add(time.Hour)) {
+		t.Fatalf("Expires = %v, want an hour after a time in [%v, %v]", tok.Expires, before, after)
+	}
+	got := rec.requests()[0]
+	want := "audience=api&grant_type=client_credentials&scope=read+write"
+	if got.form.Encode() != want {
+		t.Fatalf("form = %v, want %v", got.form, want)
+	}
+	r := &http.Request{Header: got.requestHeader}
+	user, pass, ok := r.BasicAuth()
+	if !ok || user != url.QueryEscape("tenant:app") || pass != url.QueryEscape("p+s%&w") {
+		t.Fatalf("BasicAuth = %q, %q, %v, want the form-escaped client ID and secret", user, pass, ok)
 	}
 }
 
-func TestClientCredentials_Audience(t *testing.T) {
-	srv := fakeTokenServer(t, func(form url.Values, w http.ResponseWriter) int {
-		if got := form.Get("audience"); got != "https://api.example" {
-			t.Errorf("audience = %q", got)
-		}
-		writeJSONBody(t, w, `{"access_token":"x","token_type":"Bearer"}`)
-		return http.StatusOK
-	})
-	defer srv.Close()
-
-	c := &ClientCredentials{
-		Client:   srv.Client(),
-		TokenURL: srv.URL,
-		ClientID: testID,
-		Audience: "https://api.example",
-	}
-	if _, err := c.Token(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestClientCredentials_Unauthorized(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		writeJSONBody(t, w, `{"error":"invalid_client","error_description":"bad creds"}`)
-	}))
-	defer srv.Close()
-
-	c := &ClientCredentials{Client: srv.Client(), TokenURL: srv.URL, ClientID: testID, ClientSecret: "s"}
-	_, err := c.Token(context.Background())
-	var oe *OAuth2Error
-	if !errors.As(err, &oe) {
-		t.Fatalf("err = %v, want *OAuth2Error", err)
-	}
-	if oe.Code != "invalid_client" {
-		t.Fatalf("Code = %q", oe.Code)
-	}
-	if oe.Status != http.StatusUnauthorized {
-		t.Fatalf("Status = %d", oe.Status)
-	}
-}
-
-func TestClientCredentials_ServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	c := &ClientCredentials{Client: srv.Client(), TokenURL: srv.URL, ClientID: testID}
-	_, err := c.Token(context.Background())
-	var oe *OAuth2Error
-	if !errors.As(err, &oe) {
-		t.Fatalf("err = %v, want *OAuth2Error", err)
-	}
-	if oe.Status != http.StatusInternalServerError {
-		t.Fatalf("Status = %d", oe.Status)
-	}
-}
-
-func TestClientCredentials_NoExpiryWhenAbsent(t *testing.T) {
-	srv := fakeTokenServer(t, func(_ url.Values, w http.ResponseWriter) int {
-		writeJSONBody(t, w, `{"access_token":"x","token_type":"Bearer"}`)
-		return http.StatusOK
-	})
-	defer srv.Close()
-
-	c := &ClientCredentials{Client: srv.Client(), TokenURL: srv.URL, ClientID: testID}
-	tok, err := c.Token(context.Background())
+// TestClientCredentialsTokenPassesTheContext posts the grant under the context
+// Token gets.
+func TestClientCredentialsTokenPassesTheContext(t *testing.T) {
+	transport := &markedTransport{}
+	src, err := NewClientCredentials(&ClientCredentialsConfig{ClientConfig: ClientConfig{
+		HTTPClient: &http.Client{Transport: transport}, TokenURL: idpEndpoint, ClientID: testClientID,
+	}})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewClientCredentials = %v, want a source", err)
 	}
-	if !tok.Expires.IsZero() {
-		t.Fatalf("Expires should be zero, got %v", tok.Expires)
-	}
-}
-
-func TestClientCredentials_MissingAccessToken(t *testing.T) {
-	srv := fakeTokenServer(t, func(_ url.Values, w http.ResponseWriter) int {
-		writeJSONBody(t, w, `{"token_type":"Bearer"}`)
-		return http.StatusOK
-	})
-	defer srv.Close()
-
-	c := &ClientCredentials{Client: srv.Client(), TokenURL: srv.URL, ClientID: testID}
-	_, err := c.Token(context.Background())
-	if !errors.Is(err, ErrInvalidTokenResponse) {
-		t.Fatalf("err = %v, want ErrInvalidTokenResponse", err)
+	if _, err := src.Token(marked(t)); err != nil || transport.marked.Load() != 1 {
+		t.Fatalf("Token = %v after %d marked requests, want nil after 1", err, transport.marked.Load())
 	}
 }
 
-func TestClientCredentials_EmptyTokenURL(t *testing.T) {
-	c := &ClientCredentials{ClientID: testID}
-	_, err := c.Token(context.Background())
-	if !errors.Is(err, ErrInvalidTokenResponse) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestAuthorizationCode_Refresh(t *testing.T) {
-	srv := fakeTokenServer(t, func(form url.Values, w http.ResponseWriter) int {
-		if got := form.Get("grant_type"); got != "refresh_token" {
-			t.Errorf("grant_type = %q", got)
-		}
-		if got := form.Get("refresh_token"); got != "rt-1" {
-			t.Errorf("refresh_token = %q", got)
-		}
-		writeJSONBody(t, w,
-			`{"access_token":"at","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`)
-		return http.StatusOK
-	})
-	defer srv.Close()
-
-	a := &AuthorizationCode{
-		Client:       srv.Client(),
-		TokenURL:     srv.URL,
-		ClientID:     testID,
-		ClientSecret: "sec",
-		RefreshToken: "rt-1",
-	}
-	tok, err := a.Token(context.Background())
-	if err != nil {
-		t.Fatalf("Token: %v", err)
-	}
-	if tok.Value != "at" {
-		t.Fatalf("Value = %q", tok.Value)
-	}
-	if a.RefreshToken != "rt-2" {
-		t.Fatalf("rotation failed: RefreshToken = %q", a.RefreshToken)
-	}
-}
-
-func TestAuthorizationCode_KeepsRefreshTokenWhenAbsent(t *testing.T) {
-	srv := fakeTokenServer(t, func(_ url.Values, w http.ResponseWriter) int {
-		writeJSONBody(t, w, `{"access_token":"at","token_type":"Bearer","expires_in":60}`)
-		return http.StatusOK
-	})
-	defer srv.Close()
-
-	a := &AuthorizationCode{
-		Client:       srv.Client(),
-		TokenURL:     srv.URL,
-		ClientID:     testID,
-		RefreshToken: "rt-keep",
-	}
-	if _, err := a.Token(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if a.RefreshToken != "rt-keep" {
-		t.Fatalf("RefreshToken changed: %q", a.RefreshToken)
-	}
-}
-
-func TestAuthorizationCode_MissingRefreshToken(t *testing.T) {
-	//nolint:gosec // G101: literal URL, not a credential.
-	a := &AuthorizationCode{ClientID: testID, TokenURL: "https://example.invalid/token"}
-	_, err := a.Token(context.Background())
-	var oe *OAuth2Error
-	if !errors.As(err, &oe) || oe.Code != "invalid_request" {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestOAuth2Error_String(t *testing.T) {
-	cases := []struct {
-		err  *OAuth2Error
-		want string
+func TestClientCredentialsTokenAuthStyles(t *testing.T) {
+	tests := []struct {
+		name     string
+		style    AuthStyle
+		secret   secret.Value
+		wantForm string
 	}{
-		{&OAuth2Error{Code: "invalid_grant", Description: "expired"}, "oauth2: invalid_grant: expired"},
-		{&OAuth2Error{Code: "invalid_client"}, "oauth2: invalid_client"},
-		{&OAuth2Error{Status: 502}, "oauth2: HTTP 502"},
+		{"params", AuthStyleParams, secret.New("s"),
+			"client_id=client-id&client_secret=s&grant_type=client_credentials"},
+		{"public", AuthStyleHeader, secret.Value{}, "client_id=client-id&grant_type=client_credentials"},
 	}
-	for _, tc := range cases {
-		if got := tc.err.Error(); got != tc.want {
-			t.Errorf("Error() = %q, want %q", got, tc.want)
-		}
-	}
-}
-
-func TestParseInt64(t *testing.T) {
-	if got, _ := jsonfast.DecodeInt64([]byte("42")); got != 42 {
-		t.Fatalf("got %d", got)
-	}
-	if _, ok := jsonfast.DecodeInt64([]byte("xx")); ok {
-		t.Fatal("expected ok=false for non-digit")
-	}
-	if _, ok := jsonfast.DecodeInt64(nil); ok {
-		t.Fatal("expected ok=false for nil")
-	}
-}
-
-func TestUnquoteKey(t *testing.T) {
-	if got := unquoteKey([]byte(`"x"`)); got != "x" {
-		t.Fatalf("got %q", got)
-	}
-	if got := unquoteKey([]byte(`x`)); got != "" {
-		t.Fatalf("got %q", got)
-	}
-	if got := unquoteKey([]byte(``)); got != "" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-// BenchmarkParseTokenResponse measures the JSON parsing hot path.
-func BenchmarkParseTokenResponse(b *testing.B) {
-	body := []byte(
-		`{"access_token":"AAAAAAA","token_type":"Bearer","expires_in":3600,"refresh_token":"RRRRR"}`)
-	b.ReportAllocs()
-
-	for b.Loop() {
-		_ = parseTokenResponse(body)
-	}
-}
-
-// BenchmarkClientCredentials measures the full grant flow against an
-// in-process httptest server, including HTTP and JSON parsing.
-func BenchmarkClientCredentials(b *testing.B) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		writeJSONBody(b, w, `{"access_token":"x","token_type":"Bearer","expires_in":3600}`)
-	}))
-	defer srv.Close()
-
-	c := &ClientCredentials{Client: srv.Client(), TokenURL: srv.URL, ClientID: testID, ClientSecret: "s"}
-	ctx := context.Background()
-	b.ReportAllocs()
-
-	for b.Loop() {
-		tok, err := c.Token(ctx)
-		if err != nil {
-			b.Fatal(err)
-		}
-		_ = tok
-	}
-}
-
-func TestPostFormToken_RejectsPlainHTTP(t *testing.T) {
-	c := &ClientCredentials{TokenURL: testPlainHTTPURL, ClientID: testID}
-	if _, err := c.Token(context.Background()); !errors.Is(err, ErrInsecureTokenURL) {
-		t.Fatalf("err = %v, want ErrInsecureTokenURL", err)
-	}
-}
-
-func TestRequireSecureURL(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		raw     string
-		wantErr bool
-	}{
-		{name: "https", raw: "https://idp.example/token", wantErr: false},
-		{name: "http public", raw: "http://idp.example/token", wantErr: true},
-		{name: "http localhost", raw: "http://localhost:9/token", wantErr: false},
-		{name: "http loopback v4", raw: "http://127.0.0.1:9/token", wantErr: false},
-		{name: "http loopback v6", raw: "http://[::1]:9/token", wantErr: false},
-		{name: "ftp", raw: "ftp://idp.example/token", wantErr: true},
-		{name: "garbage", raw: "://", wantErr: true},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := requireSecureURL(tt.raw)
-			if gotErr := err != nil; gotErr != tt.wantErr {
-				t.Fatalf("requireSecureURL(%q) err = %v, wantErr %v", tt.raw, err, tt.wantErr)
-			}
-			if err != nil && !errors.Is(err, ErrInsecureTokenURL) {
-				t.Fatalf("expected ErrInsecureTokenURL, got %v", err)
-			}
+	for _, tt := range tests {
+		rec := newRecording(t, answer(http.StatusOK, okToken))
+		src := clientCredentialsFor(t, rec.srv.URL, func(c *ClientCredentialsConfig) {
+			c.ClientSecret, c.AuthStyle = tt.secret, tt.style
 		})
+		if _, err := src.Token(t.Context()); err != nil {
+			t.Fatalf("Token = %v, want a token", err)
+		}
+		got := rec.requests()[0]
+		if got.form.Encode() != tt.wantForm || got.requestHeader.Get(authorization) != "" {
+			t.Errorf("%s: form %v, Authorization %q, want %s and none", tt.name, got.form,
+				got.requestHeader.Get(authorization),
+				tt.wantForm)
+		}
 	}
+}
+
+func TestClientCredentialsTokenErrors(t *testing.T) {
+	tests := []struct {
+		status    int
+		body      string
+		want      error
+		transient bool
+	}{
+		{http.StatusUnauthorized, `{"error":"invalid_client"}`, nil, false},
+		{http.StatusServiceUnavailable, `{"error":"temporarily_unavailable"}`, nil, true},
+		{http.StatusOK, `{"token_type":"Bearer"}`, ErrInvalidTokenResponse, false},
+		{http.StatusOK, okToken + `{}`, ErrInvalidTokenResponse, false},
+		{http.StatusOK, `{"access_token":"at","token_type":"Be arer"}`, ErrInvalidTokenResponse, false},
+	}
+	for _, tt := range tests {
+		rec := newRecording(t, answer(tt.status, tt.body))
+		_, err := clientCredentialsFor(t, rec.srv.URL, nil).Token(t.Context())
+		if tt.want != nil {
+			if !errors.Is(err, tt.want) || !strings.HasPrefix(err.Error(), "cred: client credentials: ") {
+				t.Errorf("%s: err = %v, want %v named after the grant", tt.body, err, tt.want)
+			}
+			continue
+		}
+		var oe *OAuth2Error
+		if !errors.As(err, &oe) || oe.Status != tt.status || oe.Transient() != tt.transient {
+			t.Errorf("%s: Token = %v, want an *OAuth2Error of status %d, transient %t", tt.body, err, tt.status,
+				tt.transient)
+		}
+	}
+}
+
+func TestClientCredentialsTokenRefusesRedirect(t *testing.T) {
+	sink := newRecording(t, answer(http.StatusOK, okToken))
+	redirect := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sink.srv.URL, http.StatusTemporaryRedirect)
+	})
+	_, err := clientCredentialsFor(t, redirect.URL, nil).Token(t.Context())
+	var oe *OAuth2Error
+	if !errors.As(err, &oe) || oe.Status != http.StatusTemporaryRedirect {
+		t.Fatalf("Token(redirect) = %v, want an *OAuth2Error of status 307", err)
+	}
+	if n := len(sink.requests()); n != 0 {
+		t.Fatalf("redirect target requests = %d, want 0", n)
+	}
+}
+
+// ExampleNewClientCredentials fetches a token with the client credentials
+// grant, caches it, and sends it on every request of an http.Client.
+func ExampleNewClientCredentials() {
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := io.WriteString(w, `{"access_token":"at-1","token_type":"Bearer","expires_in":3600}`); err != nil {
+			log.Print(err)
+		}
+	}))
+	api := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		fmt.Println(r.Header.Get("Authorization"))
+	}))
+	clientSecret := secret.New("the client secret of orders-sync")
+	src, err := NewClientCredentials(&ClientCredentialsConfig{
+		ClientConfig: ClientConfig{
+			TokenURL:     idp.URL + "/oauth2/token",
+			ClientID:     "orders-sync",
+			ClientSecret: clientSecret,
+			Scopes:       []string{"orders.read"},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	cached, err := NewCachedSource(src)
+	if err != nil {
+		log.Fatal(err)
+	}
+	client := &http.Client{Transport: NewTransport(nil, AsSigner(cached))}
+	defer idp.Close()
+	defer api.Close()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, api.URL, http.NoBody)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	if err := resp.Body.Close(); err != nil {
+		fmt.Println(err)
+	}
+	// Output: Bearer at-1
+}
+
+// ExampleNewClientCredentials_azure gets the token of an Azure service principal
+// from its tenant's v2.0 endpoint, the client secret sent in the form.
+func ExampleNewClientCredentials_azure() {
+	login := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println(r.URL.Path)
+		fmt.Println(r.PostFormValue("client_id"), r.PostFormValue("scope"))
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := io.WriteString(w, `{"access_token":"at-1","token_type":"Bearer","expires_in":3600}`); err != nil {
+			log.Print(err)
+		}
+	}))
+	defer login.Close()
+	client, loginHost := login.Client(), login.URL
+	tenantID, resource := "contoso.onmicrosoft.com", "https://graph.microsoft.com"
+	clientSecret := secret.New("the client secret of orders-sync")
+	src, err := NewClientCredentials(&ClientCredentialsConfig{
+		ClientConfig: ClientConfig{
+			HTTPClient:   client,
+			TokenURL:     loginHost + "/" + url.PathEscape(tenantID) + "/oauth2/v2.0/token",
+			ClientID:     "orders-sync",
+			ClientSecret: clientSecret,
+			Scopes:       []string{resource + "/.default"},
+			AuthStyle:    AuthStyleParams,
+		},
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	tok, err := src.Token(context.Background())
+	if err != nil || tok == nil {
+		fmt.Println(tok, err)
+		return
+	}
+	fmt.Println(tok.Value.Reveal())
+	// Output: /contoso.onmicrosoft.com/oauth2/v2.0/token
+	// orders-sync https://graph.microsoft.com/.default
+	// at-1
 }

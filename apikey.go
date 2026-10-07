@@ -1,44 +1,31 @@
 package authware
 
 import (
-	"crypto/subtle"
-	"net/http"
+	"github.com/ubyte-source/go-authware/v2/internal/problems"
+	"github.com/ubyte-source/go-authware/v2/internal/syntax"
+	"github.com/ubyte-source/go-authware/v2/secret"
 )
 
-var _ Authenticator = (*apiKeyAuthenticator)(nil)
-
-var apiKeyIdentity = &Identity{Method: ModeAPIKey, Subject: "static-apikey"}
-
-var errInvalidAPIKey = &authError{status: http.StatusUnauthorized, message: "invalid API key"}
-
-type apiKeyAuthenticator struct {
-	realm  string
-	header string
-	value  string
+// APIKeyConfig configures ModeAPIKey.
+type APIKeyConfig struct {
+	// Key (AUTH_APIKEY) is the shared API key: a header value of at least 32
+	// bytes.
+	Key secret.Value
+	// Header (AUTH_APIKEY_HEADER) carries the key; default X-Api-Key. Without
+	// it, the key of an Authorization: ApiKey header is read.
+	Header string
 }
 
-func (a *apiKeyAuthenticator) Authenticate(r *http.Request) (*Identity, error) {
-	if v := r.Header[a.header]; len(v) > 0 && secureEqual(v[0], a.value) {
-		return apiKeyIdentity, nil
-	}
-	if v := r.Header["Authorization"]; len(v) > 0 {
-		if token, ok := parseAuthScheme(v[0], "apikey"); ok && secureEqual(token, a.value) {
-			return apiKeyIdentity, nil
-		}
-	}
-	return nil, errInvalidAPIKey
-}
+// inUse reports whether any API key setting is present.
+func (a *APIKeyConfig) inUse() bool { return !a.Key.IsZero() || a.Header != "" }
 
-func (a *apiKeyAuthenticator) Challenge(err error, resourceMetadataURL string) (status int, header, message string) {
-	return challengeFromError(a.realm, err, resourceMetadataURL)
-}
-
-func (*apiKeyAuthenticator) Metadata(_ string) *ProtectedResourceMetadata { return nil }
-
-// secureEqual performs a constant-time string comparison.
-func secureEqual(left, right string) bool {
-	if len(left) != len(right) {
-		return false
+// validate requires an API key long enough and sendable as a header value,
+// and a valid header name.
+func (a *APIKeyConfig) validate(p *problems.List) {
+	if longEnough(p, "API key", a.Key) && !syntax.IsFieldValue(a.Key.Reveal()) {
+		p.Addf("API key is not a header value")
 	}
-	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+	if !syntax.IsToken(a.Header) {
+		p.Addf("API key header %q is not a valid header name", a.Header)
+	}
 }

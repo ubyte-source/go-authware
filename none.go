@@ -2,18 +2,19 @@ package authware
 
 import "net/http"
 
-var _ Authenticator = allowAllAuthenticator{}
-
-var noneIdentity = &Identity{Method: ModeNone}
-
-type allowAllAuthenticator struct{}
-
-func (allowAllAuthenticator) Authenticate(_ *http.Request) (*Identity, error) {
-	return noneIdentity, nil
+// noneAuthenticator admits every request.
+type noneAuthenticator struct {
+	id *Identity
 }
 
-func (allowAllAuthenticator) Challenge(err error, resourceMetadataURL string) (status int, header, message string) {
-	return challengeFromError(defaultRealm, err, resourceMetadataURL)
+func newNoneAuthenticator() *noneAuthenticator {
+	return &noneAuthenticator{id: &Identity{mode: ModeNone}}
 }
 
-func (allowAllAuthenticator) Metadata(_ string) *ProtectedResourceMetadata { return nil }
+func (a *noneAuthenticator) authenticate(*http.Request) (*Identity, *authError) {
+	return a.id, nil
+}
+
+func (*noneAuthenticator) challengeScheme() string { return "" }
+
+func (*noneAuthenticator) mode() Mode { return ModeNone }

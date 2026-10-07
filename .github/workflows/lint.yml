@@ -11,21 +11,19 @@ permissions:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
+      # The pinned tools need Go 1.26 or later, golangci-lint the Go 1.27.1 the
+      # Makefile pins; go.mod keeps 1.25.1, the oldest Go the library supports.
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version: "1.27.1"
 
-      - name: Run go vet
-        run: go vet ./...
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.12.2
-          args: --timeout 5m
+      - name: Run go vet, golangci-lint and deadcode, and the repository checks
+        run: make vet lint deadcode
