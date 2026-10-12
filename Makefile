@@ -1,9 +1,12 @@
 GO            ?= go
-GOLANGCI_LINT ?= GOTOOLCHAIN=go1.27.1 $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+GOLANGCI_LINT ?= GOTOOLCHAIN=go1.27.2 $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 GOVULNCHECK   ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
 DEADCODE      ?= $(GO) run golang.org/x/tools/cmd/deadcode@v0.50.0
 FUZZTIME      ?= 30s
 FUZZ_TARGETS  ?=
+# FUZZ_GO runs the fuzzer of Go 1.27, which ends a FUZZTIME run without a
+# spurious "context deadline exceeded" failure (go.dev/issue/75804).
+FUZZ_GO       ?= GOTOOLCHAIN=go1.27.2 $(GO)
 NILAWAY       ?= $(GO) run go.uber.org/nilaway/cmd/nilaway@v0.0.0-20260918162853-acb8859b9031
 TESTTIME_MAX  ?= 10
 RACECOUNT     ?= 10
@@ -111,7 +114,7 @@ fuzz: ## Run every fuzz target, or the pkg:Target list FUZZ_TARGETS, for FUZZTIM
 		pkg=$${spec%%:*}; name=$${spec#*:}; \
 		$(GO) test -list='^Fuzz' ./$$pkg | grep -qx "$$name" || \
 			{ echo "fuzz: ./$$pkg has no fuzz target $$name" >&2; exit 1; }; \
-		$(GO) test -run='^$$' -fuzz="^$$name\$$" -fuzztime=$(FUZZTIME) ./$$pkg || exit 1; \
+		$(FUZZ_GO) test -run='^$$' -fuzz="^$$name\$$" -fuzztime=$(FUZZTIME) ./$$pkg || exit 1; \
 	done
 
 fuzz-list: ## Print every fuzz target as the JSON array the fuzz workflow reads; fail when there is none

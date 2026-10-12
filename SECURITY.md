@@ -199,9 +199,9 @@ services. It defends against:
   `make test` (the tests with `-shuffle=on` and their allocation counts),
   `make cover` (the tests with `-race` and `-shuffle=on`, failing below 100%
   statement coverage) and `make bench-smoke` (100 iterations of every
-  benchmark) on Go 1.25.14 and Go 1.27.1 (`test.yml`); `make vet`
+  benchmark) on Go 1.25.14 and Go 1.27.2 (`test.yml`); `make vet`
   (`lint.yml`).
-- `golangci-lint` v2.14.0, built with Go 1.27.1 (`lint.yml`, `make lint`),
+- `golangci-lint` v2.14.0, built with Go 1.27.2 (`lint.yml`, `make lint`),
   with the repository `.golangci.yml`: every linter of its enable list and the
   `gofmt` and `goimports` formatters, `gosec` included, test files linted. Its
   part shared with go-jsonfast and mcp-server leaves out `run.go` and the
