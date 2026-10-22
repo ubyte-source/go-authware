@@ -9,8 +9,8 @@ The Makefile runs every tool at a pinned version through `go run`:
 golangci-lint v2.14.0, govulncheck v1.8.0, deadcode v0.50.0 and nilaway.
 Nothing needs a global install; `GOLANGCI_LINT=<path>`, `GOVULNCHECK=<path>`,
 `DEADCODE=<path>` and `NILAWAY=<path>` point the targets at local binaries of
-the same versions. golangci-lint builds and runs with Go 1.27.2
-(`GOTOOLCHAIN=go1.27.2`), the others with Go 1.26 or later; the go command
+the same versions. golangci-lint builds and runs with Go 1.27.3
+(`GOTOOLCHAIN=go1.27.3`), the others with Go 1.26 or later; the go command
 fetches a missing toolchain.
 
 ```bash
@@ -30,7 +30,7 @@ make ci
 
 `make ci` runs these targets, and the workflows run the same ones: `lint.yml`
 runs `vet`, `lint` and `deadcode`, `test.yml` runs `modcheck`, `test`, `cover`
-and `bench-smoke` on Go 1.25.14 and 1.27.2, `security.yml` runs `vuln` next to
+and `bench-smoke` on Go 1.25.14 and 1.27.3, `security.yml` runs `vuln` next to
 CodeQL.
 
 | Target        | Gate |

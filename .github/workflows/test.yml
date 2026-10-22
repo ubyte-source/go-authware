@@ -17,7 +17,7 @@ jobs:
       matrix:
         go:
           - "1.25.14"
-          - "1.27.2"
+          - "1.27.3"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,7 +42,7 @@ jobs:
         run: make bench-smoke
 
       - name: Upload coverage
-        if: matrix.go == '1.27.2'
+        if: matrix.go == '1.27.3'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage.out
