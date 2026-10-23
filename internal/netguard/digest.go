@@ -27,17 +27,10 @@ type digestState struct {
 	chunk   [4 << 10]byte
 }
 
-// emptyDigest is the SHA-256 of no bytes, the digest of a request without a body.
-const emptyDigest = "\xe3\xb0\xc4\x42\x98\xfc\x1c\x14\x9a\xfb\xf4\xc8\x99\x6f\xb9\x24" +
-	"\x27\xae\x41\xe4\x64\x9b\x93\x4c\xa4\x95\x99\x1b\x78\x52\xb8\x55"
-
-// Digest returns the SHA-256 of the body of r, empty without one: it streams a GetBody
+// Digest returns the SHA-256 of the body of r, which has one: it streams a GetBody
 // copy, or reads r.Body into a replayable one, setting ContentLength, or http.NoBody on
 // failure. It fails with tooLarge past limit bytes or when a copy, read or close fails.
 func (d *Digester) Digest(r *http.Request, limit int64, tooLarge error) ([sha256.Size]byte, error) {
-	if r.Body == nil || r.Body == http.NoBody {
-		return [sha256.Size]byte([]byte(emptyDigest)), nil
-	}
 	st, ok := d.pool.Get().(*digestState)
 	if !ok {
 		st = &digestState{h: sha256.New()}

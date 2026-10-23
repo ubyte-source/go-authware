@@ -21,17 +21,6 @@ func digest(body string) [sha256.Size]byte { return sha256.Sum256([]byte(body)) 
 // largeRepeats makes a 10 KB body of a digit run.
 const largeRepeats = 1000
 
-func TestDigesterDigestNone(t *testing.T) {
-	t.Parallel()
-	var d Digester
-	for _, payload := range []io.Reader{nil, http.NoBody} {
-		r := outbound(t, payload)
-		if got, err := d.Digest(r, testLimit, errTooLarge); got != digest("") || err != nil || r.GetBody != nil {
-			t.Fatalf("Digest(%v) = %x, %v, want the empty digest and r untouched", payload, got, err)
-		}
-	}
-}
-
 func TestDigesterDigestBuffers(t *testing.T) {
 	t.Parallel()
 	var d Digester
@@ -71,8 +60,7 @@ func TestDigesterDigestStreams(t *testing.T) {
 }
 
 // TestDigesterDigestAllocs pins the pooled scratch of a streamed copy: a 10 KB copy
-// streams through it and allocates nothing, nor does a request without a body or a
-// copy past the limit.
+// streams through it and allocates nothing, nor does a copy past the limit.
 func TestDigesterDigestAllocs(t *testing.T) {
 	var d Digester
 	var s strings.Reader
@@ -80,13 +68,9 @@ func TestDigesterDigestAllocs(t *testing.T) {
 	r := outbound(t, strings.NewReader("sent"))
 	copied := io.NopCloser(&s)
 	r.GetBody = func() (io.ReadCloser, error) { s.Reset(large); return copied, nil }
-	bodiless := outbound(t, http.NoBody)
 	assertAllocs(t, 0, func() {
 		if _, err := d.Digest(r, int64(len(large)), errTooLarge); err != nil {
 			t.Fatalf("Digest = %v, want the digest", err)
-		}
-		if got, err := d.Digest(bodiless, testLimit, errTooLarge); got != sha256.Sum256(nil) || err != nil {
-			t.Fatalf("Digest without a body = %x, %v, want the empty digest", got, err)
 		}
 		if _, err := d.Digest(r, int64(len(large))-1, errTooLarge); !errors.Is(err, errTooLarge) {
 			t.Fatalf("Digest past the limit = %v, want errTooLarge", err)
