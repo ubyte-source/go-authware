@@ -104,10 +104,12 @@ func (v *Verifier) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// admits reports whether the window admits the timestamp unix now, from
-// unix-window until unix+window+1s.
+// admits reports whether the window admits the timestamp unix now, from unix-window
+// until unix+window+1s; unix is not negative and the window at most 1h, so neither
+// difference overflows.
 func (v *Verifier) admits(unix int64) bool {
-	return withinWindow(time.Now().Unix(), unix, int64(v.window/time.Second))
+	nowSec, window := time.Now().Unix(), int64(v.window/time.Second)
+	return unix-window <= nowSec && nowSec-window <= unix
 }
 
 // record records nonce until the window stops admitting the timestamp unix, and
@@ -176,13 +178,6 @@ func isLowerHex(s string, n int) bool {
 		}
 	}
 	return true
-}
-
-// withinWindow reports whether |now-ts| <= window for window >= 0. A
-// difference past MaxInt64 wraps negative and fails the check.
-func withinWindow(now, ts, window int64) bool {
-	d := max(now, ts) - min(now, ts)
-	return d >= 0 && d <= window
 }
 
 // bodyDigest returns the SHA-256 of the body r has, refusing one over

@@ -506,6 +506,11 @@ func TestVerifierVerifyWindow(t *testing.T) {
 						secs, offset, err)
 				}
 			}
+			r := signedRequest(t, s, http.MethodGet, testURL, "")
+			resign(r, nil, math.MaxInt64)
+			if err := newTestVerifier(t, tc.opts...).Verify(t.Context(), r); !errors.Is(err, ErrTimestampSkew) {
+				t.Errorf("window %ds, timestamp MaxInt64: Verify = %v, want ErrTimestampSkew", secs, err)
+			}
 		}
 	})
 }
@@ -584,30 +589,6 @@ func TestIsLowerHex(t *testing.T) {
 	} {
 		if isLowerHex(s, sampleHexLen) {
 			t.Errorf("isLowerHex(%q, 16) = true, want false", s)
-		}
-	}
-}
-
-func TestWithinWindow(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		now, ts, bound int64
-		want           bool
-	}{
-		{testUnix, testUnix, 0, true},
-		{testUnix, testUnix + 1, 1, true},
-		{testUnix + 1, testUnix, 1, true},
-		{testUnix, testUnix + 2, 1, false},
-		{testUnix + 2, testUnix, 1, false},
-		{testUnix, math.MinInt64 + testUnix, windowSeconds, false},
-		{math.MinInt64 + testUnix, testUnix, windowSeconds, false},
-		{0, math.MaxInt64, windowSeconds, false},
-		{math.MinInt64, -1, math.MaxInt64, true},
-		{math.MinInt64, 0, math.MaxInt64, false},
-		{math.MinInt64, math.MaxInt64, math.MaxInt64, false},
-	} {
-		if got := withinWindow(tc.now, tc.ts, tc.bound); got != tc.want {
-			t.Errorf("withinWindow(%d, %d, %d) = %t, want %t", tc.now, tc.ts, tc.bound, got, tc.want)
 		}
 	}
 }
