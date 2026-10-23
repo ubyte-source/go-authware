@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +27,6 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ubyte-source/go-authware/v2/secret"
 )
@@ -707,10 +707,9 @@ func TestSigningHost(t *testing.T) {
 	assertAllocs(t, 0, func() { signingHost(r) })
 }
 
-// wireHost returns the Host a server reads from a request net/http writes for
-// host, and false when net/http refuses to write it.
-func wireHost(host string) (string, bool) {
-	r := &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "http", Host: host, Path: slash}, Host: host}
+// sentHost returns the Host a server reads from r as net/http writes it, and false
+// when net/http refuses to write it.
+func sentHost(r *http.Request) (string, bool) {
 	var wire bytes.Buffer
 	if r.Write(&wire) != nil {
 		return "", false
@@ -720,6 +719,98 @@ func wireHost(host string) (string, bool) {
 		return "", false
 	}
 	return got.Host, true
+}
+
+// wireHost returns the Host a server reads from a request net/http writes for
+// host, and false when net/http refuses to write it.
+func wireHost(host string) (string, bool) {
+	return sentHost(&http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "http", Host: host, Path: slash},
+		Host: host})
+}
+
+// TestSentAsIs compares sentAsIs with what net/http sends for a host holding each
+// byte, and for hosts outside ASCII, which it converts to punycode or refuses.
+func TestSentAsIs(t *testing.T) {
+	check := func(host string) {
+		sent, ok := wireHost(host)
+		if got, want := sentAsIs(host), ok && sent == host; got != want {
+			t.Errorf("sentAsIs(%q) = %t, want %t: net/http sends it as %q, written %t", host, got, want, sent, ok)
+		}
+	}
+	for _, host := range []string{"", "b\u00fccher.example", "\u00e9", "x\xff", "[::1]:8443", "a%zz"} {
+		check(host)
+	}
+	for c := range math.MaxUint8 + 1 {
+		check(testLetter + string([]byte{byte(c)}) + testLetter)
+	}
+}
+
+// checkSignedHost signs a GET of host over scheme, whose default port is port, and,
+// writing it as net/http does, requires Sign to refuse it, r left as it was, exactly
+// when net/http alters the host referenceSigningHost signs, or that host is empty.
+func checkSignedHost(t *testing.T, s *sigV4, scheme, port, host string) {
+	t.Helper()
+	r := &http.Request{Method: http.MethodGet, Host: host, URL: &url.URL{Scheme: scheme, Path: slash}}
+	err := s.Sign(t.Context(), r)
+	signing := referenceSigningHost(host, port)
+	wire, written := wireHost(signing)
+	if signing != "" && written && wire == signing {
+		checkSentHost(t, r, err, signing)
+		return
+	}
+	want := ErrInvalidHost
+	if signing == "" {
+		want = ErrMissingHost
+	}
+	if !errors.Is(err, want) || r.Host != host || r.Header != nil {
+		t.Fatalf("Sign(%s://%s) = %v, leaving host %q and headers %v; want %v, r unchanged: net/http sends %q as "+
+			"%q, written %t", scheme, host, err, r.Host, r.Header, want, signing, wire, written)
+	}
+}
+
+// checkSentHost requires Sign, which returned err, to have set the host signing on
+// r, which a server reads back from r as net/http writes it.
+func checkSentHost(t *testing.T, r *http.Request, err error, signing string) {
+	t.Helper()
+	if got, ok := sentHost(r); err != nil || r.Host != signing || !ok || got != signing {
+		t.Fatalf("Sign(%s) = %v, setting host %q, which a server reads as %q, read %t; want nil and %q read back",
+			signing, err, r.Host, got, ok, signing)
+	}
+}
+
+// signedHosts are hosts that net/http sends as they are, alters or finds missing
+// once Sign drops their zone and default port.
+func signedHosts() []string {
+	return []string{
+		"host.example", "HOST.example:8443", "[::1]:443", "[fe80::1%eth0]:80", "a%zz", "a:b:443", ":443", "",
+		"b\u00fccher.example", "a b", "x/y", "a@b:80", "x\xff", "[fe80::1%eth0 x]", "\u00e9:443",
+	}
+}
+
+// TestSigV4SignRefusesAlteredHosts signs each of signedHosts over http and https:
+// Sign refuses with ErrInvalidHost exactly the hosts net/http alters.
+func TestSigV4SignRefusesAlteredHosts(t *testing.T) {
+	s := newTestSigV4(t, testService, "")
+	for _, host := range signedHosts() {
+		checkSignedHost(t, s, "http", "80", host)
+		checkSignedHost(t, s, "https", "443", host)
+	}
+}
+
+// FuzzSigV4SignHost signs every host over http or https: Sign refuses with
+// ErrInvalidHost exactly the hosts net/http alters, and sends the others as signed.
+func FuzzSigV4SignHost(f *testing.F) {
+	for _, host := range signedHosts() {
+		f.Add(host, true)
+	}
+	s := newTestSigV4(f, testService, "")
+	f.Fuzz(func(t *testing.T, host string, https bool) {
+		scheme, port := "http", "80"
+		if https {
+			scheme, port = "https", "443"
+		}
+		checkSignedHost(t, s, scheme, port, host)
+	})
 }
 
 // TestSigV4SignSendsTheSignedHost signs zoned IPv6 hosts and their bare twins at one
@@ -776,8 +867,7 @@ func referenceSigningHost(host, port string) string {
 }
 
 // FuzzSigningHost checks signingHost against referenceSigningHost for every
-// host, so skipping a host without the default port changes no answer, and
-// requires net/http to send each valid ASCII host it returns as it is.
+// host, so skipping a host without the default port changes no answer.
 func FuzzSigningHost(f *testing.F) {
 	for _, host := range []string{"host.example", "host.example:443", "host.example:80", "[::1]", "[::1]:443", "[::1]x",
 		"x]:80", "::1", "a:b:443", ":443", "", "[fe80::1%eth0]:443", "[fe80::1%en%31]:8080", "[a%b]%c:80"} {
@@ -791,12 +881,6 @@ func FuzzSigningHost(f *testing.F) {
 		got := signingHost(&http.Request{Host: host, URL: &url.URL{Scheme: scheme}})
 		if want := referenceSigningHost(host, port); got != want {
 			t.Fatalf("signingHost(%s://%s) = %q, want %q", scheme, host, got, want)
-		}
-		sent, ok := wireHost(got)
-		nonASCII := strings.ContainsFunc(got, func(c rune) bool { return c >= utf8.RuneSelf })
-		if ok && !nonASCII && (sent != "" || got == "") && sent != got {
-			t.Fatalf("signingHost(%s://%s) = %q, which net/http sends as %q; want it sent as it is", scheme, host,
-				got, sent)
 		}
 	})
 }

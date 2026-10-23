@@ -244,7 +244,7 @@ services. It defends against:
   body digests (`FuzzDigesterDigest`), token and error answers
   (`FuzzParseTokenResponse`, `FuzzErrorMembers`, `FuzzParseMSIResponse`,
   `FuzzParseIDToken`, `FuzzParseAccessToken`, `FuzzParseEpoch`), SigV4 signing
-  (`FuzzSigningHost`, `FuzzCanonicalHeaders`, `FuzzCanonicalQuery`,
-  `FuzzAppendQueryComponent`, `FuzzAWSEncodePath`), secrets files
-  (`FuzzDecodeFile`), replay signing and verification (`FuzzAppendHost`,
-  `FuzzAppendRequestURI`, `FuzzVerifierVerify`).
+  (`FuzzSigV4SignHost`, `FuzzSigningHost`, `FuzzCanonicalHeaders`,
+  `FuzzCanonicalQuery`, `FuzzAppendQueryComponent`, `FuzzAWSEncodePath`),
+  secrets files (`FuzzDecodeFile`), replay signing and verification
+  (`FuzzAppendHost`, `FuzzAppendRequestURI`, `FuzzVerifierVerify`).

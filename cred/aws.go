@@ -136,13 +136,16 @@ func NewSigV4(cfg *SigV4Config) (Signer, error) {
 	return &sigV4{cfg: *cfg, s3Paths: s3Service(cfg.Service)}, nil
 }
 
-// Sign signs r at the current time. A missing host fails with ErrMissingHost before r
-// changes, and a body it hashes that fails to read or close with ErrInvalidBody, one
-// over 1 MiB with it and ErrBodyTooLarge.
+// Sign signs r at the current time. A missing host, or one net/http alters, fails with
+// ErrMissingHost or ErrInvalidHost before r changes; a body it hashes that fails to
+// read or close with ErrInvalidBody, and one over 1 MiB with it and ErrBodyTooLarge.
 func (s *sigV4) Sign(_ context.Context, r *http.Request) error {
 	host := signingHost(r)
-	if host == "" {
+	switch {
+	case host == "":
 		return ErrMissingHost
+	case !sentAsIs(host):
+		return ErrInvalidHost
 	}
 	r.Host = host
 	amzDate := time.Now().UTC().Format(awsTimeFormat)
@@ -355,6 +358,22 @@ func signingHost(r *http.Request) string {
 		return "[" + h + "]"
 	}
 	return h
+}
+
+// hostPunctuation holds the bytes beside the unreserved ones that the Host header check
+// of net/http admits.
+const hostPunctuation = "!$%&'()*+,:;=[]"
+
+// sentAsIs reports whether net/http sends host, which holds no zone, as it is: whether
+// its Host header check admits every byte, an unreserved one or one of hostPunctuation,
+// which leaves out every byte outside ASCII.
+func sentAsIs(host string) bool {
+	for i := range len(host) {
+		if c := host[i]; !syntax.IsUnreserved(c) && strings.IndexByte(hostPunctuation, c) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type queryPair struct{ encName, encValue []byte }

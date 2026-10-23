@@ -545,10 +545,13 @@ src, err := cred.NewClientCredentials(&cred.ClientCredentialsConfig{
 
 AWS SigV4, verified against the AWS test suite vectors. The signature covers
 the hash of a body of at most 1 MiB unless `UnsignedPayload` is set, which
-only an S3 `Service` accepts. `Sign` refuses a request without a host with
-`ErrMissingHost`, before it changes the request, and a body it hashes that
-fails to read or close with an error wrapping `ErrInvalidBody`; the refusal
-of a body over 1 MiB wraps `ErrBodyTooLarge` too.
+only an S3 `Service` accepts. Before it changes the request, `Sign` refuses
+one without a host with `ErrMissingHost`, and one whose host net/http would
+not send as it is with `ErrInvalidHost`: a host with a byte outside ASCII,
+which net/http converts to punycode, or with another byte its Host header
+check refuses. A body it hashes that fails to read or close fails with an
+error wrapping `ErrInvalidBody`; the refusal of a body over 1 MiB wraps
+`ErrBodyTooLarge` too.
 
 ```go
 signer, err := cred.NewSigV4(&cred.SigV4Config{

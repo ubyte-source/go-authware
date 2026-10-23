@@ -45,6 +45,10 @@ var (
 	ErrBodyTooLarge = errors.New("body too large")
 	// ErrMissingHost reports a request without a host to sign.
 	ErrMissingHost = errors.New(errPrefix + "request has no host")
+	// ErrInvalidHost reports a request host that net/http would not send as it is: one
+	// with a byte outside ASCII, which it converts to punycode, or another byte its
+	// Host header check refuses.
+	ErrInvalidHost = errors.New(errPrefix + "invalid request host")
 
 	// ErrInvalidKeyPair reports a certificate and key that cannot be loaded as a
 	// pair; it wraps ErrInvalidConfig.
