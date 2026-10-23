@@ -253,7 +253,7 @@ func (m *jwkMembers) key() (verificationKey, error) {
 }
 
 // parseRSAKey accepts a modulus of 2048 to 8192 bits and an odd exponent
-// from 3 to 2^31-1.
+// from 3 to 2^31-1; the error names an exponent past 31 bits by its length.
 func parseRSAKey(n, e string) (verificationKey, error) {
 	nb, err := keyParam(n, errParamN)
 	if err != nil {
@@ -267,8 +267,11 @@ func parseRSAKey(n, e string) (verificationKey, error) {
 	if bits := modulus.BitLen(); bits < minRSABits || bits > maxRSABits {
 		return nil, fmt.Errorf("%w: RSA modulus of %d bits", errUnusableKey, bits)
 	}
-	if bits := exponent.BitLen(); bits < minRSAExponentBits || bits > maxRSAExponentBits || exponent.Bit(0) == 0 {
-		return nil, fmt.Errorf("%w: RSA exponent %s", errUnusableKey, exponent)
+	switch bits := exponent.BitLen(); {
+	case bits > maxRSAExponentBits:
+		return nil, fmt.Errorf("%w: RSA exponent of %d bits", errUnusableKey, bits)
+	case bits < minRSAExponentBits || exponent.Bit(0) == 0:
+		return nil, fmt.Errorf("%w: RSA exponent %d", errUnusableKey, exponent.Int64())
 	}
 	return &rsaKey{rsaPub: &rsa.PublicKey{N: modulus, E: int(exponent.Int64())}}, nil
 }

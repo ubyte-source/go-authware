@@ -11,6 +11,7 @@ import (
 	"maps"
 	"math/big"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -176,6 +177,11 @@ func TestParseJWKNamesTheFault(t *testing.T) {
 		{padded(rsaJWK, memberN), "unusable JWK: parameter n is not base64url", errParamN},
 		{padded(rsaJWK, memberE), "unusable JWK: parameter e is not base64url", errParamE},
 		{withMembers(rsaJWK, map[string]any{memberN: 5}), "unusable JWK: n is not a string", errUnusableKey},
+		{withMembers(rsaJWK, map[string]any{memberE: b64Int(1)}), "unusable JWK: RSA exponent 1", errUnusableKey},
+		{withMembers(rsaJWK, map[string]any{memberE: b64Int(65536)}), "unusable JWK: RSA exponent 65536",
+			errUnusableKey},
+		{withMembers(rsaJWK, map[string]any{memberE: b64Int(1<<31 + 1)}), "unusable JWK: RSA exponent of 32 bits",
+			errUnusableKey},
 		{padded(ecJWK, memberX), "unusable JWK: parameter x is not base64url", errParamX},
 		{padded(ecJWK, memberY), "unusable JWK: parameter y is not base64url", errParamY},
 		{padded(edJWK, memberX), "unusable JWK: parameter x is not base64url", errParamX},
@@ -326,6 +332,38 @@ func TestParseJWKSInvalid(t *testing.T) {
 			t.Errorf("parseJWKS(%.40s) = %+v, %v, want nil, errInvalidJWKS", doc, set, err)
 		}
 	}
+}
+
+// overlongExponent is the size in bytes of the shorter exponent of
+// TestParseJWKSCostIsLinear, far past the 31 bits an exponent may hold.
+const overlongExponent = 4 << 10
+
+// TestParseJWKSCostIsLinear refuses a key with an over-long exponent at two
+// sizes, naming the exponent by its bit length, and the larger costs at most
+// costMargin*costScale times as much.
+func TestParseJWKSCostIsLinear(t *testing.T) {
+	key := publicJWK(t, testRSAKey(), nil)
+	exponent := func(size int) []byte { return bytes.Repeat([]byte{0xff}, size) }
+	document := func(size int) string {
+		e := base64.RawURLEncoding.EncodeToString(exponent(size))
+		return string(jwksDocument(t, withMembers(key, map[string]any{memberE: e})))
+	}
+	short, long := document(overlongExponent), document(costScale*overlongExponent)
+	for doc, size := range map[string]int{short: overlongExponent, long: costScale * overlongExponent} {
+		bits := new(big.Int).SetBytes(exponent(size)).BitLen()
+		want := "invalid JWKS: no usable key\nunusable JWK: RSA exponent of " + strconv.Itoa(bits) + " bits"
+		if set, err := parseJWKS(doc); set != nil || !errors.Is(err, errUnusableKey) || err.Error() != want {
+			t.Fatalf("parseJWKS(an exponent of %d bytes) = %+v, %.80v; want nil, %q", size, set, err, want)
+		}
+	}
+	run := func(doc string) func() {
+		return func() {
+			if _, err := parseJWKS(doc); !errors.Is(err, errUnusableKey) {
+				t.Fatalf("parseJWKS(an over-long exponent) = %.80v, want errUnusableKey", err)
+			}
+		}
+	}
+	assertLinearCost(t, run(short), run(long))
 }
 
 func TestJWKSetMatch(t *testing.T) {

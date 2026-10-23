@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ubyte-source/go-authware/v2/internal/oauthwire"
 )
@@ -173,48 +172,6 @@ func TestParamPolicyQualify(t *testing.T) {
 				tc.want, tc.ok)
 		}
 	}
-}
-
-// Bounds of the cost tests: an input costScale times as large may take
-// costMargin*costScale times as long, timed as the fastest of costTrials runs
-// in one of costAttempts attempts.
-const (
-	costScale    = 8
-	costMargin   = 3
-	costTrials   = 5
-	costAttempts = 3
-)
-
-// fastestRun returns the time of the fastest of costTrials runs of f.
-func fastestRun(f func()) time.Duration {
-	var fastest time.Duration
-	for trial := range costTrials {
-		start := time.Now()
-		f()
-		if elapsed := time.Since(start); trial == 0 || elapsed < fastest {
-			fastest = elapsed
-		}
-	}
-	return fastest
-}
-
-// assertLinearCost fails t unless large, which works on costScale times the
-// input of small, takes at most costMargin*costScale times as long. The race
-// detector's overhead is not linear, so under it large runs once, unchecked.
-func assertLinearCost(t *testing.T, small, large func()) {
-	t.Helper()
-	if raceEnabled() {
-		large()
-		return
-	}
-	var base, scaled time.Duration
-	for range costAttempts {
-		if base, scaled = fastestRun(small), fastestRun(large); scaled <= costMargin*costScale*base {
-			return
-		}
-	}
-	t.Errorf("%d times the input took %s against %s, want at most %d times as long (PERF-3.1: O(n))",
-		costScale, scaled, base, costMargin*costScale)
 }
 
 // qualifyScopes is the length of the shorter list of
