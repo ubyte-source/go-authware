@@ -244,9 +244,11 @@ const (
 	stackGap   = "\n\n"
 )
 
-// TestMain runs the tests, then fails the run when a goroutine running code
-// of this module outlives them.
+// TestMain runs the tests in the local zone UTC+1, which a signing time shows unless
+// converted to UTC, then fails the run when a goroutine running code of this module
+// outlives them.
 func TestMain(m *testing.M) {
+	time.Local = time.FixedZone("UTC+1", int(time.Hour/time.Second))
 	code := m.Run()
 	if stray := strayGoroutines(); code == 0 && stray != "" {
 		code = 1

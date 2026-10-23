@@ -140,17 +140,12 @@ func NewSigV4(cfg *SigV4Config) (Signer, error) {
 // and the X-Amz-* headers and canonicalizes the query, so the wire matches; unless
 // UnsignedPayload is set, it hashes a body of at most 1 MiB, from GetBody or buffered.
 func (s *sigV4) Sign(_ context.Context, r *http.Request) error {
-	return s.signAt(r, time.Now())
-}
-
-func (s *sigV4) signAt(r *http.Request, now time.Time) error {
 	host := signingHost(r)
 	if host == "" {
 		return ErrMissingHost
 	}
 	r.Host = host
-	now = now.UTC()
-	amzDate := now.Format(awsTimeFormat)
+	amzDate := time.Now().UTC().Format(awsTimeFormat)
 	if r.Header == nil {
 		r.Header = http.Header{}
 	}

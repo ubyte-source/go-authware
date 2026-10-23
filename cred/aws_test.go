@@ -73,11 +73,10 @@ func newTestSigV4(tb testing.TB, service, sessionToken string) *sigV4 {
 	return s
 }
 
-// awsExampleTime is the signing instant of the reference vectors, given in a
-// zone other than UTC.
+// awsExampleTime is the signing instant of the reference vectors.
 func awsExampleTime(tb testing.TB) time.Time {
 	tb.Helper()
-	at, err := time.Parse(time.RFC3339, "2015-08-30T13:36:00+01:00")
+	at, err := time.Parse(time.RFC3339, "2015-08-30T12:36:00Z")
 	if err != nil {
 		tb.Fatalf("Parse(signing instant) = %v, want a time", err)
 	}
@@ -283,30 +282,35 @@ func sigV4OtherCases() []sigV4Case {
 	}
 }
 
+// TestSigV4Sign signs the reference vectors at their signing instant, which the
+// bubble's clock reaches; TestMain sets a local zone other than UTC.
 func TestSigV4Sign(t *testing.T) {
-	for _, tt := range slices.Concat(sigV4GetCases(), sigV4OtherCases()) {
-		service, signed := cmp.Or(tt.service, testService), cmp.Or(tt.signed, "host;x-amz-date")
-		r := newReq(t, cmp.Or(tt.method, http.MethodGet), tt.rawURL, strings.NewReader(tt.body))
-		for _, h := range tt.headers {
-			r.Header[h[0]] = append(r.Header[h[0]], h[1])
+	synctest.Test(t, func(t *testing.T) {
+		time.Sleep(time.Until(awsExampleTime(t)))
+		for _, tt := range slices.Concat(sigV4GetCases(), sigV4OtherCases()) {
+			service, signed := cmp.Or(tt.service, testService), cmp.Or(tt.signed, "host;x-amz-date")
+			r := newReq(t, cmp.Or(tt.method, http.MethodGet), tt.rawURL, strings.NewReader(tt.body))
+			for _, h := range tt.headers {
+				r.Header[h[0]] = append(r.Header[h[0]], h[1])
+			}
+			if err := newTestSigV4(t, service, tt.sessionToken).Sign(t.Context(), r); err != nil {
+				t.Fatalf("%s: Sign = %v, want nil", tt.name, err)
+			}
+			want := "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/" + service + "/aws4_request, " +
+				"SignedHeaders=" + signed + ", Signature=" + tt.sig
+			if got := r.Header.Get(authorization); got != want {
+				t.Errorf("%s:\n got %s\nwant %s", tt.name, got, want)
+			}
+			if r.Header.Get(headerAmzDate) != awsExampleStamp {
+				t.Errorf("%s: X-Amz-Date = %q, want 20150830T123600Z", tt.name, r.Header.Get(headerAmzDate))
+			}
 		}
-		if err := newTestSigV4(t, service, tt.sessionToken).signAt(r, awsExampleTime(t)); err != nil {
-			t.Fatalf("%s: signAt = %v, want nil", tt.name, err)
+		bare := &http.Request{Method: http.MethodGet, URL: newReq(t, http.MethodGet, exampleURL, http.NoBody).URL}
+		if err := newTestSigV4(t, testService, "").Sign(t.Context(), bare); err != nil ||
+			bare.Header.Get(headerAmzDate) != awsExampleStamp || bare.Header.Get(authorization) == "" {
+			t.Fatalf("Sign(no header map) = %v with %v, want a signed request", err, bare.Header)
 		}
-		want := "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/" + service + "/aws4_request, " +
-			"SignedHeaders=" + signed + ", Signature=" + tt.sig
-		if got := r.Header.Get(authorization); got != want {
-			t.Errorf("%s:\n got %s\nwant %s", tt.name, got, want)
-		}
-		if r.Header.Get(headerAmzDate) != awsExampleStamp {
-			t.Errorf("%s: X-Amz-Date = %q, want 20150830T123600Z", tt.name, r.Header.Get(headerAmzDate))
-		}
-	}
-	bare := &http.Request{Method: http.MethodGet, URL: newReq(t, http.MethodGet, exampleURL, http.NoBody).URL}
-	if err := newTestSigV4(t, testService, "").signAt(bare, awsExampleTime(t)); err != nil ||
-		bare.Header.Get(headerAmzDate) != awsExampleStamp || bare.Header.Get(authorization) == "" {
-		t.Fatalf("signAt(no header map) = %v with %v, want a signed request", err, bare.Header)
-	}
+	})
 }
 
 func TestSigV4SignCurrentTime(t *testing.T) {
@@ -673,36 +677,39 @@ func wireHost(host string) (string, bool) {
 	return got.Host, true
 }
 
-// TestSigV4SignSendsTheSignedHost signs requests to IPv6 literals with zones,
-// writes them as net/http sends them and reads them back as a server does: the
-// Host that arrives is the one Sign set, signed as for the address alone.
+// TestSigV4SignSendsTheSignedHost signs zoned IPv6 hosts and their bare twins at one
+// instant of a bubble, writes them as net/http does and reads them back as a server
+// does: the Host that arrives is the one Sign set, signed as for the address alone.
 func TestSigV4SignSendsTheSignedHost(t *testing.T) {
-	s := newTestSigV4(t, testService, "")
-	for raw, bare := range map[string]string{
-		"http://[fe80::1%25eth0]:8080/":  "http://[fe80::1]:8080/",
-		"https://[fe80::1%25eth0]:443/":  "https://[fe80::1]/",
-		"http://[fe80::1%25en%2531]:80/": "http://[fe80::1]/",
-	} {
-		zoned, plain := newReq(t, http.MethodGet, raw, http.NoBody), newReq(t, http.MethodGet, bare, http.NoBody)
-		for _, r := range []*http.Request{zoned, plain} {
-			if err := s.signAt(r, awsExampleTime(t)); err != nil {
-				t.Fatalf("signAt(%s) = %v, want nil", r.URL, err)
+	synctest.Test(t, func(t *testing.T) {
+		s := newTestSigV4(t, testService, "")
+		for raw, bare := range map[string]string{
+			"http://[fe80::1%25eth0]:8080/":  "http://[fe80::1]:8080/",
+			"https://[fe80::1%25eth0]:443/":  "https://[fe80::1]/",
+			"http://[fe80::1%25en%2531]:80/": "http://[fe80::1]/",
+		} {
+			zoned, plain := newReq(t, http.MethodGet, raw, http.NoBody), newReq(t, http.MethodGet, bare, http.NoBody)
+			for _, r := range []*http.Request{zoned, plain} {
+				if err := s.Sign(t.Context(), r); err != nil {
+					t.Fatalf("Sign(%s) = %v, want nil", r.URL, err)
+				}
+			}
+			var wire bytes.Buffer
+			if err := zoned.Write(&wire); err != nil {
+				t.Fatalf("Write(%s) = %v, want the signed request written", raw, err)
+			}
+			got, err := http.ReadRequest(bufio.NewReader(&wire))
+			if err != nil {
+				t.Fatalf("ReadRequest(%s) = %v, want the signed request", raw, err)
+			}
+			if zoned.Host != plain.Host || got.Host != plain.Host ||
+				got.Header.Get(authorization) != plain.Header.Get(authorization) {
+				t.Errorf("Sign(%s) set host %q, which arrives as %q with %q; want %q both (Sign: \"so the wire "+
+					"matches\"), signed as %s", raw, zoned.Host, got.Host, got.Header.Get(authorization), plain.Host,
+					bare)
 			}
 		}
-		var wire bytes.Buffer
-		if err := zoned.Write(&wire); err != nil {
-			t.Fatalf("Write(%s) = %v, want the signed request written", raw, err)
-		}
-		got, err := http.ReadRequest(bufio.NewReader(&wire))
-		if err != nil {
-			t.Fatalf("ReadRequest(%s) = %v, want the signed request", raw, err)
-		}
-		if zoned.Host != plain.Host || got.Host != plain.Host ||
-			got.Header.Get(authorization) != plain.Header.Get(authorization) {
-			t.Errorf("Sign(%s) set host %q, which arrives as %q with %q; want %q both (Sign: \"so the wire "+
-				"matches\"), signed as %s", raw, zoned.Host, got.Host, got.Header.Get(authorization), plain.Host, bare)
-		}
-	}
+	})
 }
 
 // ipv6Zone matches an IPv6 literal host around its zone, from the first "%" to
