@@ -109,15 +109,8 @@ func File(path string) (Provider, error) {
 	case err != nil:
 		return nil, fmt.Errorf("%w: %w", ErrInvalidFile, err)
 	}
-	info, err := f.Stat()
-	switch {
-	case err != nil:
-		err = fmt.Errorf("%w: check file type: %w", invalid, err)
-	case !info.Mode().IsRegular():
-		err = fmt.Errorf("%w: not a regular file", invalid)
-	}
-	if err != nil {
-		return nil, errors.Join(err, f.Close())
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		return nil, errors.Join(fmt.Errorf("%w: not a regular file", invalid), err, f.Close())
 	}
 	return decodeFile(f, invalid)
 }
