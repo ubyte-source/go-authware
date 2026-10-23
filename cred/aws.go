@@ -134,9 +134,9 @@ func NewSigV4(cfg *SigV4Config) (Signer, error) {
 	return &sigV4{cfg: *cfg, s3Paths: s3Service(cfg.Service)}, nil
 }
 
-// Sign signs r at the current time. It sets r.Host without a default port and
-// the X-Amz-* headers, hashes a body of at most 1 MiB, from GetBody or buffered
-// for replay, and puts the query in canonical form, so the wire matches.
+// Sign signs r at the current time. It sets r.Host without an IPv6 zone or default port
+// and the X-Amz-* headers and canonicalizes the query, so the wire matches; unless
+// UnsignedPayload is set, it hashes a body of at most 1 MiB, from GetBody or buffered.
 func (s *sigV4) Sign(_ context.Context, r *http.Request) error {
 	return s.signAt(r, time.Now())
 }
@@ -339,10 +339,12 @@ func stringToSign(amzDate, scope string, canonical []byte) []byte {
 	return hex.AppendEncode(b, sum[:])
 }
 
-// signingHost returns the request host without the default port of an http or
-// https request, a port clients leave out of the Host header.
+// signingHost returns the host of r without the zone of an IPv6 literal, which net/http
+// sends over HTTP/2 and cuts from its last "%" over HTTP/1.1, and without the default
+// port of an http or https request, which clients leave out of the Host header.
 func signingHost(r *http.Request) string {
-	host, scheme := cmp.Or(r.Host, r.URL.Host), r.URL.Scheme
+	head, tail := netguard.SplitZone(cmp.Or(r.Host, r.URL.Host))
+	host, scheme := head+tail, r.URL.Scheme
 	if (scheme != netguard.SchemeHTTPS && scheme != netguard.SchemeHTTP) ||
 		host[strings.LastIndexByte(host, ':')+1:] != netguard.DefaultPort(scheme) {
 		return host

@@ -239,10 +239,11 @@ services. It defends against:
   `FuzzFacadeServeTokenUpstreamAnswer`, `FuzzRedirectURIs`), header sanitizing
   (`FuzzSanitizeHeaderValue`), the environment list splitter
   (`FuzzSplitList`), the strict JSON objects (`FuzzIterate`), the outbound URL
-  policy (`FuzzCheck`), outbound body digests (`FuzzDigesterDigest`), token
-  and error answers (`FuzzParseTokenResponse`, `FuzzErrorMembers`,
-  `FuzzParseMSIResponse`, `FuzzParseIDToken`, `FuzzParseAccessToken`,
-  `FuzzParseEpoch`), SigV4 signing (`FuzzSigningHost`, `FuzzCanonicalHeaders`,
-  `FuzzCanonicalQuery`, `FuzzAppendQueryComponent`, `FuzzAWSEncodePath`),
-  secrets files (`FuzzDecodeFile`), replay signing and verification
-  (`FuzzAppendHost`, `FuzzAppendRequestURI`, `FuzzVerifierVerify`).
+  policy (`FuzzCheck`), the zones of IPv6 hosts (`FuzzSplitZone`), outbound
+  body digests (`FuzzDigesterDigest`), token and error answers
+  (`FuzzParseTokenResponse`, `FuzzErrorMembers`, `FuzzParseMSIResponse`,
+  `FuzzParseIDToken`, `FuzzParseAccessToken`, `FuzzParseEpoch`), SigV4 signing
+  (`FuzzSigningHost`, `FuzzCanonicalHeaders`, `FuzzCanonicalQuery`,
+  `FuzzAppendQueryComponent`, `FuzzAWSEncodePath`), secrets files
+  (`FuzzDecodeFile`), replay signing and verification (`FuzzAppendHost`,
+  `FuzzAppendRequestURI`, `FuzzVerifierVerify`).

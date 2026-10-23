@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 
 	"github.com/ubyte-source/go-authware/v2/internal/keyedmac"
+	"github.com/ubyte-source/go-authware/v2/internal/netguard"
 	"github.com/ubyte-source/go-authware/v2/secret"
 )
 
@@ -162,28 +162,11 @@ func (st *macState) input(r *http.Request, body *[sha256.Size]byte) []byte {
 	return append(b, '\n')
 }
 
-// appendHost appends host without the zone of an IPv6 literal, as net/http
-// sends it, and with ASCII letters lowercased.
+// appendHost appends host with ASCII letters lowercased and without the zone of an IPv6
+// literal, which net/http sends over HTTP/2 and cuts from its last "%" over HTTP/1.1.
 func appendHost(b []byte, host string) []byte {
-	head, tail := splitZone(host)
+	head, tail := netguard.SplitZone(host)
 	return appendLower(appendLower(b, head), tail)
-}
-
-// splitZone returns host around the zone of an IPv6 literal, which net/http drops:
-// "[fe80::1%en0]:80" around "%en0". A host without a zone is head, tail empty.
-func splitZone(host string) (head, tail string) {
-	if !strings.HasPrefix(host, "[") {
-		return host, ""
-	}
-	end := strings.LastIndexByte(host, ']')
-	if end == -1 {
-		return host, ""
-	}
-	zone := strings.LastIndexByte(host[:end], '%')
-	if zone == -1 {
-		return host, ""
-	}
-	return host[:zone], host[end:]
 }
 
 // appendRequestURI appends u.RequestURI() to b, joining the query itself

@@ -1,6 +1,7 @@
 package cred
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -18,12 +19,14 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ubyte-source/go-authware/v2/secret"
 )
@@ -613,6 +616,8 @@ func TestSigningHost(t *testing.T) {
 		"https://a.example:80/": "a.example:80", "http://a.example:443/": "a.example:443",
 		"https://[::1]:443/": "[::1]", "https://a.example/": "a.example",
 		"https://[2001:db8:0:0:0:0:0:1]:443/": "[2001:db8:0:0:0:0:0:1]", "ftp://a.example:443/": "a.example:443",
+		"http://[fe80::1%25eth0]:8080/": "[fe80::1]:8080", "http://[fe80::1%25eth0]:80/": "[fe80::1]",
+		"https://[fe80::1%25en%2531]:443/": "[fe80::1]",
 	} {
 		r := newReq(t, http.MethodGet, raw, http.NoBody)
 		if got := signingHost(r); got != want {
@@ -627,11 +632,77 @@ func TestSigningHost(t *testing.T) {
 	assertAllocs(t, 0, func() { signingHost(r) })
 }
 
-// FuzzSigningHost checks signingHost against net.SplitHostPort applied to
-// every host, so skipping a host without the default port changes no answer.
+// wireHost returns the Host a server reads from a request net/http writes for
+// host, and false when net/http refuses to write it.
+func wireHost(host string) (string, bool) {
+	r := &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "http", Host: host, Path: slash}, Host: host}
+	var wire bytes.Buffer
+	if r.Write(&wire) != nil {
+		return "", false
+	}
+	got, err := http.ReadRequest(bufio.NewReader(&wire))
+	if err != nil {
+		return "", false
+	}
+	return got.Host, true
+}
+
+// TestSigV4SignSendsTheSignedHost signs requests to IPv6 literals with zones,
+// writes them as net/http sends them and reads them back as a server does: the
+// Host that arrives is the one Sign set, signed as for the address alone.
+func TestSigV4SignSendsTheSignedHost(t *testing.T) {
+	s := newTestSigV4(t, testService, "")
+	for raw, bare := range map[string]string{
+		"http://[fe80::1%25eth0]:8080/":  "http://[fe80::1]:8080/",
+		"https://[fe80::1%25eth0]:443/":  "https://[fe80::1]/",
+		"http://[fe80::1%25en%2531]:80/": "http://[fe80::1]/",
+	} {
+		zoned, plain := newReq(t, http.MethodGet, raw, http.NoBody), newReq(t, http.MethodGet, bare, http.NoBody)
+		for _, r := range []*http.Request{zoned, plain} {
+			if err := s.signAt(r, awsExampleTime(t)); err != nil {
+				t.Fatalf("signAt(%s) = %v, want nil", r.URL, err)
+			}
+		}
+		var wire bytes.Buffer
+		if err := zoned.Write(&wire); err != nil {
+			t.Fatalf("Write(%s) = %v, want the signed request written", raw, err)
+		}
+		got, err := http.ReadRequest(bufio.NewReader(&wire))
+		if err != nil {
+			t.Fatalf("ReadRequest(%s) = %v, want the signed request", raw, err)
+		}
+		if zoned.Host != plain.Host || got.Host != plain.Host ||
+			got.Header.Get(authorization) != plain.Header.Get(authorization) {
+			t.Errorf("Sign(%s) set host %q, which arrives as %q with %q; want %q both (Sign: \"so the wire "+
+				"matches\"), signed as %s", raw, zoned.Host, got.Host, got.Header.Get(authorization), plain.Host, bare)
+		}
+	}
+}
+
+// ipv6Zone matches an IPv6 literal host around its zone, from the first "%" to
+// the last "]".
+var ipv6Zone = regexp.MustCompile(`(?s)^(\[[^%]*)%.*(\][^\]]*)$`)
+
+// referenceSigningHost returns host without its zone and, through
+// net.SplitHostPort, without port when port is the one it names.
+func referenceSigningHost(host, port string) string {
+	want := ipv6Zone.ReplaceAllString(host, "$1$2")
+	h, p, err := net.SplitHostPort(want)
+	switch {
+	case err != nil || p != port:
+		return want
+	case strings.Contains(h, ":"):
+		return "[" + h + "]"
+	}
+	return h
+}
+
+// FuzzSigningHost checks signingHost against referenceSigningHost for every
+// host, so skipping a host without the default port changes no answer, and
+// requires net/http to send each valid ASCII host it returns as it is.
 func FuzzSigningHost(f *testing.F) {
 	for _, host := range []string{"host.example", "host.example:443", "host.example:80", "[::1]", "[::1]:443", "[::1]x",
-		"x]:80", "::1", "a:b:443", ":443", ""} {
+		"x]:80", "::1", "a:b:443", ":443", "", "[fe80::1%eth0]:443", "[fe80::1%en%31]:8080", "[a%b]%c:80"} {
 		f.Add(host, true)
 	}
 	f.Fuzz(func(t *testing.T, host string, https bool) {
@@ -639,15 +710,15 @@ func FuzzSigningHost(f *testing.F) {
 		if https {
 			scheme, port = "https", "443"
 		}
-		want := host
-		if h, p, err := net.SplitHostPort(host); err == nil && p == port {
-			want = h
-			if strings.Contains(h, ":") {
-				want = "[" + h + "]"
-			}
-		}
-		if got := signingHost(&http.Request{Host: host, URL: &url.URL{Scheme: scheme}}); got != want {
+		got := signingHost(&http.Request{Host: host, URL: &url.URL{Scheme: scheme}})
+		if want := referenceSigningHost(host, port); got != want {
 			t.Fatalf("signingHost(%s://%s) = %q, want %q", scheme, host, got, want)
+		}
+		sent, ok := wireHost(got)
+		nonASCII := strings.ContainsFunc(got, func(c rune) bool { return c >= utf8.RuneSelf })
+		if ok && !nonASCII && (sent != "" || got == "") && sent != got {
+			t.Fatalf("signingHost(%s://%s) = %q, which net/http sends as %q; want it sent as it is", scheme, host,
+				got, sent)
 		}
 	})
 }

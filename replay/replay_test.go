@@ -162,27 +162,39 @@ func wireHost(host string) (string, bool) {
 	return got.Host, true
 }
 
-// TestAppendHost appends the host net/http sends for a host, lowercased: an
-// IPv6 literal loses its zone, the last "%" before the last "]".
+// settledHost returns the host net/http sends for host once it sends one as it
+// is, writing each host it changes again, and false when it refuses one.
+func settledHost(host string) (string, bool) {
+	for {
+		sent, ok := wireHost(host)
+		if !ok || sent == host {
+			return sent, ok
+		}
+		host = sent
+	}
+}
+
+// TestAppendHost appends the host net/http settles on for a host, lowercased: an
+// IPv6 literal loses its zone, from the first "%" before the last "]".
 func TestAppendHost(t *testing.T) {
 	t.Parallel()
 	for _, host := range []string{
 		"API.Example:8443", "a.example:", "[FE80::1%eth0]:8080", "[fe80::1%en0]", "[::1]:80", "[a%b%c]:1",
 		"[a%b]%c", "[%]", "[fe80::1%en0", "x%y", "x%y]:80", "[]", "",
 	} {
-		wire, ok := wireHost(host)
+		settled, ok := settledHost(host)
 		if !ok {
 			t.Fatalf("net/http refused the host %q, want it written", host)
 		}
-		if got, want := string(appendHost([]byte(prefix), host)), prefix+strings.ToLower(wire); got != want {
-			t.Errorf("appendHost(%q) = %q, want %q, the host net/http sends lowercased", host, got, want)
+		if got, want := string(appendHost([]byte(prefix), host)), prefix+strings.ToLower(settled); got != want {
+			t.Errorf("appendHost(%q) = %q, want %q, the host net/http settles on lowercased", host, got, want)
 		}
 	}
 }
 
 // FuzzAppendHost checks appendHost against the reference for every host, and
-// against the host net/http sends for every valid ASCII host: net/http sends an
-// invalid one empty.
+// against the host net/http settles on for every valid ASCII host: net/http
+// sends an invalid one empty.
 func FuzzAppendHost(f *testing.F) {
 	for _, seed := range []string{
 		"a.example:80", "[fe80::1%en0]:80", "[a%b%c]:1", "[a%b]%c", "[x", "x%y]:80", "a b", "[\xff%\n]",
@@ -195,13 +207,13 @@ func FuzzAppendHost(f *testing.F) {
 		if want := referenceHost(host); got != want {
 			t.Fatalf("appendHost(%q) = %q, want %q, the reference", host, got, want)
 		}
-		wire, ok := wireHost(host)
+		settled, ok := settledHost(host)
 		nonASCII := strings.ContainsFunc(host, func(c rune) bool { return c >= utf8.RuneSelf })
-		if !ok || (wire == "" && host != "") || nonASCII {
+		if !ok || (settled == "" && host != "") || nonASCII {
 			return
 		}
-		if want := strings.ToLower(wire); got != want {
-			t.Fatalf("appendHost(%q) = %q, want %q, the host net/http sends lowercased", host, got, want)
+		if want := strings.ToLower(settled); got != want {
+			t.Fatalf("appendHost(%q) = %q, want %q, the host net/http settles on lowercased", host, got, want)
 		}
 	})
 }

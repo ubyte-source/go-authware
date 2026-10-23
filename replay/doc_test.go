@@ -124,12 +124,12 @@ func newTestVerifier(tb testing.TB, opts ...VerifierOption) *Verifier {
 	return v
 }
 
-// ipv6Zone matches an IPv6 literal host around the zone net/http drops from it:
-// the last "%" before the last "]".
-var ipv6Zone = regexp.MustCompile(`(?s)^(\[.*)%[^%]*(\][^\]]*)$`)
+// ipv6Zone matches an IPv6 literal host around its zone, from the first "%" to
+// the last "]".
+var ipv6Zone = regexp.MustCompile(`(?s)^(\[[^%]*)%.*(\][^\]]*)$`)
 
 // referenceHost returns, independently of the production code, host without
-// the zone net/http drops and with ASCII letters lowercased.
+// the zone of an IPv6 literal and with ASCII letters lowercased.
 func referenceHost(host string) string {
 	b := []byte(ipv6Zone.ReplaceAllString(host, "$1$2"))
 	for i, c := range b {

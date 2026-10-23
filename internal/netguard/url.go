@@ -67,3 +67,21 @@ func DefaultPort(scheme string) string {
 	}
 	return "443"
 }
+
+// SplitZone returns host around the zone of an IPv6 literal, from the first "%" before
+// the last "]" up to that "]": head+tail holds no zone that net/http's HTTP/1.1 writer
+// cuts. A host without a zone is head, tail empty.
+func SplitZone(host string) (head, tail string) {
+	if !strings.HasPrefix(host, "[") {
+		return host, ""
+	}
+	end := strings.LastIndexByte(host, ']')
+	if end == -1 {
+		return host, ""
+	}
+	zone := strings.IndexByte(host[:end], '%')
+	if zone == -1 {
+		return host, ""
+	}
+	return host[:zone], host[end:]
+}

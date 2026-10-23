@@ -94,12 +94,16 @@ func TestSignerSignHeaderSlices(t *testing.T) {
 	}
 }
 
-// TestSignerSignZoneHost signs requests to IPv6 literal hosts, one with a zone,
-// sends them through net/http's wire form and verifies what a server reads.
+// TestSignerSignZoneHost signs requests to IPv6 literal hosts with and without a
+// zone, a zone holding a "%" included, sends them through net/http's wire form
+// and verifies what a server reads.
 func TestSignerSignZoneHost(t *testing.T) {
 	t.Parallel()
 	s, v := newTestSigner(t), newTestVerifier(t)
-	for _, target := range []string{"http://[fe80::1%25eth0]:8080/p", "http://[::1]:8080/p"} {
+	for _, target := range []string{
+		"http://[fe80::1%25eth0]:8080/p", "http://[fe80::1%25en%2531]/p", "http://[fe80::1%25a%25b]:8080/p",
+		"http://[::1]:8080/p",
+	} {
 		r := signedRequest(t, s, http.MethodGet, target, "")
 		var wire bytes.Buffer
 		if err := r.Write(&wire); err != nil {
