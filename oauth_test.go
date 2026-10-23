@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"regexp"
@@ -19,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ubyte-source/go-authware/v2/internal/problems"
@@ -264,93 +264,106 @@ func (f *jwksFixture) key(tb testing.TB, alg string) any {
 	return k
 }
 
+// TestOAuthAuthenticatorValidateToken verifies, at testUnix, a token of each
+// key of the fixture, and refuses each with the payload of another token.
 func TestOAuthAuthenticatorValidateToken(t *testing.T) {
-	f := newJWKSFixture(t)
-	a := newTestOAuth(t, jwksOAuth(f.srv.URL), nil)
-	now := time.Unix(testUnix, 0)
-	for alg := range f.members {
-		token := f.sign(t, alg, testClaims())
-		id, err := a.validateToken(t.Context(), token, now)
-		if err != nil {
-			t.Errorf("validateToken(%s) = %v, want nil", alg, err)
-			continue
+	synctest.Test(t, func(t *testing.T) {
+		time.Sleep(time.Until(time.Unix(testUnix, 0)))
+		f := newJWKSFixture(t)
+		a := newTestOAuth(t, jwksOAuth(testJWKSURL), f.srv.client())
+		for alg := range f.members {
+			token := f.sign(t, alg, testClaims())
+			id, err := a.validateToken(t.Context(), token)
+			if err != nil {
+				t.Errorf("validateToken(%s) = %v, want nil", alg, err)
+				continue
+			}
+			if id.subject != testUser || id.mode != ModeOAuth ||
+				!slices.Equal(id.scopes, []string{testRead, testWrite}) || id.claims != mustJSON(t, testClaims()) {
+				t.Errorf("validateToken(%s) = %+v, want %s granted read and write with the signed claims", alg, id,
+					testUser)
+			}
+			other := f.sign(t, alg, claimsWith(map[string]any{claimSub: testAdmin}))
+			parts, otherParts := strings.Split(token, jwsSeparator), strings.Split(other, jwsSeparator)
+			forged := parts[0] + jwsSeparator + otherParts[1] + jwsSeparator + parts[2]
+			if id, err := a.validateToken(t.Context(), forged); id != nil || !errors.Is(err, errSignature) {
+				t.Errorf("validateToken(%s, swapped payload) = %+v, %v, want nil, errSignature", alg, id, err)
+			}
 		}
-		if id.subject != testUser || id.mode != ModeOAuth || !slices.Equal(id.scopes, []string{testRead, testWrite}) ||
-			id.claims != mustJSON(t, testClaims()) {
-			t.Errorf("validateToken(%s) = %+v, want %s granted read and write with the signed claims", alg, id,
-				testUser)
+		if hits := f.srv.hits.Load(); hits != 1 {
+			t.Errorf("JWKS requests = %d, want 1", hits)
 		}
-		other := f.sign(t, alg, claimsWith(map[string]any{claimSub: testAdmin}))
-		parts, otherParts := strings.Split(token, jwsSeparator), strings.Split(other, jwsSeparator)
-		forged := parts[0] + jwsSeparator + otherParts[1] + jwsSeparator + parts[2]
-		if id, err := a.validateToken(t.Context(), forged, now); id != nil || !errors.Is(err, errSignature) {
-			t.Errorf("validateToken(%s, swapped payload) = %+v, %v, want nil, errSignature", alg, id, err)
-		}
-	}
-	if hits := f.srv.hits.Load(); hits != 1 {
-		t.Errorf("JWKS requests = %d, want 1", hits)
-	}
+	})
 }
 
+// TestOAuthAuthenticatorValidateTokenRejects refuses, at testUnix, each token
+// with its class, fetching no keys for an alg that JWKS mode refuses.
 func TestOAuthAuthenticatorValidateTokenRejects(t *testing.T) {
-	f := newJWKSFixture(t)
-	a := newTestOAuth(t, jwksOAuth(f.srv.URL), nil)
-	now := time.Unix(testUnix, 0)
-	priv := testRSAKey()
-	tests := []struct {
-		name  string
-		token string
-		want  error
-	}{
-		{algHS256, signToken(t, algHS256, []byte(testLongSecret), "", testClaims()), errUnsupportedAlg},
-		{"none", segment(`{"alg":"none"}`) + jwsSeparator + segment(mustJSON(t, testClaims())) + jwsSeparator,
-			errUnsupportedAlg},
-		{"garbage", "not a token", errMalformedToken},
-		{"ES256 over RSA", signRaw(t, algRS256, priv, `{"alg":"ES256","kid":"r"}`, mustJSON(t, testClaims())),
-			errNoKey},
-		{"unknown kid", signToken(t, algRS256, priv, "zz", testClaims()), errNoKey},
-		{"other key", signToken(t, algRS256, testRSAKey2(), kidR, testClaims()), errSignature},
-		{"expired", f.sign(t, algES256, claimsWith(map[string]any{claimExp: testUnix - 3600})), ErrTokenExpired},
-		{"ID token", f.sign(t, algEdDSA, claimsWith(map[string]any{testClaimNonce: "n", claimScope: nil})), errIDToken},
-	}
-	for _, tc := range tests {
-		f.srv.hits.Store(0)
-		if id, err := a.validateToken(t.Context(), tc.token, now); id != nil || !errors.Is(err, tc.want) {
-			t.Errorf("validateToken(%s) = %+v, %v, want nil, %v", tc.name, id, err, tc.want)
+	synctest.Test(t, func(t *testing.T) {
+		time.Sleep(time.Until(time.Unix(testUnix, 0)))
+		f := newJWKSFixture(t)
+		a := newTestOAuth(t, jwksOAuth(testJWKSURL), f.srv.client())
+		priv := testRSAKey()
+		tests := []struct {
+			name  string
+			token string
+			want  error
+		}{
+			{algHS256, signToken(t, algHS256, []byte(testLongSecret), "", testClaims()), errUnsupportedAlg},
+			{"none", segment(`{"alg":"none"}`) + jwsSeparator + segment(mustJSON(t, testClaims())) + jwsSeparator,
+				errUnsupportedAlg},
+			{"garbage", "not a token", errMalformedToken},
+			{"ES256 over RSA", signRaw(t, algRS256, priv, `{"alg":"ES256","kid":"r"}`, mustJSON(t, testClaims())),
+				errNoKey},
+			{"unknown kid", signToken(t, algRS256, priv, "zz", testClaims()), errNoKey},
+			{"other key", signToken(t, algRS256, testRSAKey2(), kidR, testClaims()), errSignature},
+			{"expired", f.sign(t, algES256, claimsWith(map[string]any{claimExp: testUnix - 3600})), ErrTokenExpired},
+			{"ID token", f.sign(t, algEdDSA, claimsWith(map[string]any{testClaimNonce: "n", claimScope: nil})),
+				errIDToken},
 		}
-		if errors.Is(tc.want, errUnsupportedAlg) && f.srv.hits.Load() != 0 {
-			t.Errorf("validateToken(%s) fetched keys %d times, want 0", tc.name, f.srv.hits.Load())
+		for _, tc := range tests {
+			f.srv.hits.Store(0)
+			if id, err := a.validateToken(t.Context(), tc.token); id != nil || !errors.Is(err, tc.want) {
+				t.Errorf("validateToken(%s) = %+v, %v, want nil, %v", tc.name, id, err, tc.want)
+			}
+			if errors.Is(tc.want, errUnsupportedAlg) && f.srv.hits.Load() != 0 {
+				t.Errorf("validateToken(%s) fetched keys %d times, want 0", tc.name, f.srv.hits.Load())
+			}
 		}
-	}
+	})
 }
 
+// TestOAuthAuthenticatorValidateTokenHMAC verifies, at testUnix, HS256 tokens
+// of the secret up to the size limit and refuses the others with their class.
 func TestOAuthAuthenticatorValidateTokenHMAC(t *testing.T) {
-	a := newTestOAuth(t, hmacOAuth(), nil)
-	now := time.Unix(testUnix, 0)
-	mac := []byte(testLongSecret)
-	input := segment(`{"alg":"HS256"}`) + ".A"
-	badPayload := input + jwsSeparator + base64.RawURLEncoding.EncodeToString(signInput(t, algHS256, mac, input))
-	tests := []struct {
-		name  string
-		token string
-		want  error
-	}{
-		{algHS256, signToken(t, algHS256, mac, "", testClaims()), nil},
-		{algHS384, signToken(t, algHS384, mac, "any", testClaims()), errUnsupportedAlg},
-		{algHS512, signToken(t, algHS512, mac, "any", testClaims()), errUnsupportedAlg},
-		{algRS256, signToken(t, algRS256, testRSAKey(), "", testClaims()), errUnsupportedAlg},
-		{"other secret", signToken(t, algHS256, []byte(testLongSecret+"x"), "", testClaims()), errSignature},
-		{"payload encoding", badPayload, errMalformedToken},
-		{"over max size", tokenOfSize(t, tokenLimit+1), errTokenTooLarge},
-		{"max size", tokenOfSize(t, tokenLimit), nil},
-	}
-	for _, tc := range tests {
-		id, err := a.validateToken(t.Context(), tc.token, now)
-		if !errors.Is(err, tc.want) || (err == nil) == (id == nil) {
-			t.Errorf("validateToken(%s) = %+v, %v, want %v and an identity only without error", tc.name, id, err,
-				tc.want)
+	synctest.Test(t, func(t *testing.T) {
+		time.Sleep(time.Until(time.Unix(testUnix, 0)))
+		a := newTestOAuth(t, hmacOAuth(), nil)
+		mac := []byte(testLongSecret)
+		input := segment(`{"alg":"HS256"}`) + ".A"
+		badPayload := input + jwsSeparator + base64.RawURLEncoding.EncodeToString(signInput(t, algHS256, mac, input))
+		tests := []struct {
+			name  string
+			token string
+			want  error
+		}{
+			{algHS256, signToken(t, algHS256, mac, "", testClaims()), nil},
+			{algHS384, signToken(t, algHS384, mac, "any", testClaims()), errUnsupportedAlg},
+			{algHS512, signToken(t, algHS512, mac, "any", testClaims()), errUnsupportedAlg},
+			{algRS256, signToken(t, algRS256, testRSAKey(), "", testClaims()), errUnsupportedAlg},
+			{"other secret", signToken(t, algHS256, []byte(testLongSecret+"x"), "", testClaims()), errSignature},
+			{"payload encoding", badPayload, errMalformedToken},
+			{"over max size", tokenOfSize(t, tokenLimit+1), errTokenTooLarge},
+			{"max size", tokenOfSize(t, tokenLimit), nil},
 		}
-	}
+		for _, tc := range tests {
+			id, err := a.validateToken(t.Context(), tc.token)
+			if !errors.Is(err, tc.want) || (err == nil) == (id == nil) {
+				t.Errorf("validateToken(%s) = %+v, %v, want %v and an identity only without error", tc.name, id, err,
+					tc.want)
+			}
+		}
+	})
 }
 
 // tokenOfSize signs an HS256 token of exactly size bytes.
@@ -372,84 +385,103 @@ func tokenOfSize(tb testing.TB, size int) string {
 	return ""
 }
 
+// TestOAuthAuthenticatorValidateTokenAccessType requires, at testUnix, the
+// at+jwt type of the header when the config asks for it.
 func TestOAuthAuthenticatorValidateTokenAccessType(t *testing.T) {
-	oc := hmacOAuth()
-	oc.RequireAccessTokenType = true
-	a := newTestOAuth(t, oc, nil)
-	mac, claims := []byte(testLongSecret), mustJSON(t, testClaims())
-	for typ, want := range map[string]error{"at+jwt": nil, "application/at+jwt": nil, "JWT": errTokenType} {
-		token := signRaw(t, algHS256, mac, `{"alg":"HS256","typ":"`+typ+`"}`, claims)
-		id, err := a.validateToken(t.Context(), token, time.Unix(testUnix, 0))
-		if !errors.Is(err, want) || (err == nil) == (id == nil) {
-			t.Errorf("validateToken(typ %s) = %+v, %v, want %v and an identity only without error", typ, id, err, want)
+	synctest.Test(t, func(t *testing.T) {
+		time.Sleep(time.Until(time.Unix(testUnix, 0)))
+		oc := hmacOAuth()
+		oc.RequireAccessTokenType = true
+		a := newTestOAuth(t, oc, nil)
+		mac, claims := []byte(testLongSecret), mustJSON(t, testClaims())
+		for typ, want := range map[string]error{"at+jwt": nil, "application/at+jwt": nil, "JWT": errTokenType} {
+			token := signRaw(t, algHS256, mac, `{"alg":"HS256","typ":"`+typ+`"}`, claims)
+			id, err := a.validateToken(t.Context(), token)
+			if !errors.Is(err, want) || (err == nil) == (id == nil) {
+				t.Errorf("validateToken(typ %s) = %+v, %v, want %v and an identity only without error", typ, id, err,
+					want)
+			}
 		}
-	}
-	untyped := signRaw(t, algHS256, mac, `{"alg":"HS256"}`, claims)
-	if id, err := a.validateToken(t.Context(), untyped, time.Unix(testUnix, 0)); id != nil ||
-		!errors.Is(err, errTokenType) {
-		t.Errorf("validateToken(no typ) = %+v, %v, want nil, errTokenType", id, err)
-	}
+		untyped := signRaw(t, algHS256, mac, `{"alg":"HS256"}`, claims)
+		if id, err := a.validateToken(t.Context(), untyped); id != nil || !errors.Is(err, errTokenType) {
+			t.Errorf("validateToken(no typ) = %+v, %v, want nil, errTokenType", id, err)
+		}
+	})
 }
 
 // TestOAuthAuthenticatorValidateTokenRenewsKeys presents a token of a key
 // the set lacks: the set is refetched once per retry.After until it has it.
 func TestOAuthAuthenticatorValidateTokenRenewsKeys(t *testing.T) {
-	keyA, keyB := testRSAKey(), testRSAKey2()
-	jwkA, jwkB := publicJWK(t, keyA, map[string]any{memberKid: kidA}), publicJWK(t, keyB,
-		map[string]any{memberKid: "b"})
-	srv := newJWKSServer(t, jwksDocument(t, jwkA))
-	a := newTestOAuth(t, jwksOAuth(srv.URL), nil)
-	t0 := time.Unix(testUnix, 0)
-	tokenB := signToken(t, algRS256, keyB, "b", testClaims())
-	if _, err := a.validateToken(t.Context(), tokenB, t0); !errors.Is(err, errNoKey) || srv.hits.Load() != 2 {
-		t.Fatalf("validateToken = %v after %d requests, want errNoKey after 2", err, srv.hits.Load())
-	}
-	srv.set(http.StatusOK, jwksDocument(t, jwkA, jwkB))
-	for _, st := range []struct {
-		at   time.Duration
-		want error
-		hits int32
-	}{
-		{fetchPause - time.Second, errNoKey, 2},
-		{fetchPause, nil, hitsAfterRefetch},
-	} {
-		if _, err := a.validateToken(t.Context(), tokenB, t0.Add(st.at)); !errors.Is(err, st.want) ||
-			srv.hits.Load() != st.hits {
-			t.Fatalf("validateToken(+%v) = %v after %d requests, want %v after %d", st.at, err, srv.hits.Load(),
-				st.want, st.hits)
+	synctest.Test(t, func(t *testing.T) {
+		t0 := time.Unix(testUnix, 0)
+		time.Sleep(time.Until(t0))
+		keyA, keyB := testRSAKey(), testRSAKey2()
+		jwkA, jwkB := publicJWK(t, keyA, map[string]any{memberKid: kidA}), publicJWK(t, keyB,
+			map[string]any{memberKid: "b"})
+		srv := newJWKSServer(t, jwksDocument(t, jwkA))
+		a := newTestOAuth(t, jwksOAuth(testJWKSURL), srv.client())
+		tokenB := signToken(t, algRS256, keyB, "b", testClaims())
+		if _, err := a.validateToken(t.Context(), tokenB); !errors.Is(err, errNoKey) || srv.hits.Load() != 2 {
+			t.Fatalf("validateToken = %v after %d requests, want errNoKey after 2", err, srv.hits.Load())
 		}
-	}
-	noKid := signToken(t, algRS256, keyA, "", testClaims())
-	_, err := a.validateToken(t.Context(), noKid, t0.Add(2*fetchPause))
-	if !errors.Is(err, errAmbiguousKey) || srv.hits.Load() != hitsAfterRefetch {
-		t.Fatalf("validateToken(no kid, two keys) = %v after %d requests, want errAmbiguousKey after 3", err,
-			srv.hits.Load())
-	}
+		srv.set(http.StatusOK, jwksDocument(t, jwkA, jwkB))
+		for _, st := range []struct {
+			at   time.Duration
+			want error
+			hits int32
+		}{
+			{fetchPause - time.Second, errNoKey, 2},
+			{fetchPause, nil, hitsAfterRefetch},
+		} {
+			time.Sleep(time.Until(t0.Add(st.at)))
+			if _, err := a.validateToken(t.Context(), tokenB); !errors.Is(err, st.want) || srv.hits.Load() != st.hits {
+				t.Fatalf("validateToken(+%v) = %v after %d requests, want %v after %d", st.at, err, srv.hits.Load(),
+					st.want, st.hits)
+			}
+		}
+		time.Sleep(fetchPause)
+		noKid := signToken(t, algRS256, keyA, "", testClaims())
+		if _, err := a.validateToken(t.Context(), noKid); !errors.Is(err, errAmbiguousKey) ||
+			srv.hits.Load() != hitsAfterRefetch {
+			t.Fatalf("validateToken(no kid, two keys) = %v after %d requests, want errAmbiguousKey after 3", err,
+				srv.hits.Load())
+		}
+	})
 }
 
+// TestOAuthAuthenticatorValidateTokenLongTTL fails a forced refetch 25h after
+// the keys of a 48h TTL arrived: past the stale limit, the keys are unavailable.
 func TestOAuthAuthenticatorValidateTokenLongTTL(t *testing.T) {
-	key := testRSAKey()
-	srv := newJWKSServer(t, jwksDocument(t, publicJWK(t, key, map[string]any{memberKid: kidA})))
-	oc := jwksOAuth(srv.URL)
-	oc.KeysCacheTTL = 2 * staleLimit
-	a := newTestOAuth(t, oc, nil)
-	t0 := time.Unix(testUnix, 0)
-	if _, err := a.validateToken(t.Context(), signToken(t, algRS256, key, kidA, testClaims()), t0); err != nil {
-		t.Fatalf("validateToken = %v, want nil", err)
-	}
-	srv.set(http.StatusServiceUnavailable, nil)
-	unknown := signToken(t, algRS256, key, "b", testClaims())
-	_, err := a.validateToken(t.Context(), unknown, t0.Add(25*time.Hour))
-	if !errors.Is(err, ErrKeysUnavailable) || !errors.Is(err, errNoKey) || srv.hits.Load() != 2 {
-		t.Fatalf("validateToken(unknown kid, refresh failing) = %v after %d requests, want ErrKeysUnavailable "+
-			"of errNoKey after 2", err, srv.hits.Load())
-	}
+	synctest.Test(t, func(t *testing.T) {
+		time.Sleep(time.Until(time.Unix(testUnix, 0)))
+		key := testRSAKey()
+		srv := newJWKSServer(t, jwksDocument(t, publicJWK(t, key, map[string]any{memberKid: kidA})))
+		oc := jwksOAuth(testJWKSURL)
+		oc.KeysCacheTTL = 2 * staleLimit
+		a := newTestOAuth(t, oc, srv.client())
+		if _, err := a.validateToken(t.Context(), signToken(t, algRS256, key, kidA, testClaims())); err != nil {
+			t.Fatalf("validateToken = %v, want nil", err)
+		}
+		srv.set(http.StatusServiceUnavailable, nil)
+		time.Sleep(25 * time.Hour)
+		unknown := signToken(t, algRS256, key, "b", testClaims())
+		_, err := a.validateToken(t.Context(), unknown)
+		if !errors.Is(err, ErrKeysUnavailable) || !errors.Is(err, errNoKey) || srv.hits.Load() != 2 {
+			t.Fatalf("validateToken(unknown kid, refresh failing) = %v after %d requests, want ErrKeysUnavailable "+
+				"of errNoKey after 2", err, srv.hits.Load())
+		}
+	})
+}
+
+// liveClaims returns testClaims valid for the next hour of the clock.
+func liveClaims() map[string]any {
+	return claimsWith(map[string]any{claimExp: time.Now().Add(time.Hour).Unix()})
 }
 
 // liveToken signs testClaims, valid for the next hour, with members replaced.
 func liveToken(tb testing.TB, members map[string]any) string {
 	tb.Helper()
-	c := claimsWith(map[string]any{claimExp: time.Now().Add(time.Hour).Unix()})
+	c := liveClaims()
 	maps.Copy(c, members)
 	return signToken(tb, algHS256, []byte(testLongSecret), "", c)
 }
@@ -536,18 +568,22 @@ func TestOAuthAuthenticatorAuthenticateFailures(t *testing.T) {
 	}
 }
 
+// TestOAuthAuthenticatorAuthenticateKeysUnavailable answers a token 503 when
+// its JWKS endpoint redirects, without following it, or fails.
 func TestOAuthAuthenticatorAuthenticateKeysUnavailable(t *testing.T) {
+	const movedHost, goodHost = "moved.example.test", "good.example.test"
 	good := newJWKSServer(t, jwksDocument(t, publicJWK(t, testRSAKey(), map[string]any{memberKid: kidR})))
-	moved := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, good.URL, http.StatusFound)
-	}))
-	defer moved.Close()
+	moved := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://"+goodHost+testJWKSPath, http.StatusFound)
+	})
 	down := newJWKSServer(t, nil)
 	down.set(http.StatusBadGateway, nil)
-	expSec := time.Now().Add(time.Hour).Unix()
-	token := signToken(t, algRS256, testRSAKey(), kidR, claimsWith(map[string]any{claimExp: expSec}))
-	for jwksURL, status := range map[string]int{moved.URL: http.StatusFound, down.URL: http.StatusBadGateway} {
-		a := newTestOAuth(t, jwksOAuth(jwksURL), moved.Client())
+	client := &http.Client{Transport: hostTransport{movedHost: moved, goodHost: good, testIssuerHost: down}}
+	token := signToken(t, algRS256, testRSAKey(), kidR, liveClaims())
+	for jwksURL, status := range map[string]int{
+		"https://" + movedHost + testJWKSPath: http.StatusFound, testJWKSURL: http.StatusBadGateway,
+	} {
+		a := newTestOAuth(t, jwksOAuth(jwksURL), client)
 		id, e := a.authenticate(bearerRequest(t, token))
 		if id != nil || e == nil || !errors.Is(e, ErrKeysUnavailable) || e.status != http.StatusServiceUnavailable ||
 			!errorMatches(e, statusError(status)) || good.hits.Load() != 0 {
@@ -557,18 +593,21 @@ func TestOAuthAuthenticatorAuthenticateKeysUnavailable(t *testing.T) {
 	}
 }
 
-// TestOAuthAuthenticatorValidateTokenHMACSizes verifies every HMAC algorithm
-// under a secret as long as the widest hash.
+// TestOAuthAuthenticatorValidateTokenHMACSizes verifies, at testUnix, every
+// HMAC algorithm under a secret as long as the widest hash.
 func TestOAuthAuthenticatorValidateTokenHMACSizes(t *testing.T) {
-	oc := hmacOAuth()
-	oc.HMACSecret = secret.New(testWideSecret)
-	a := newTestOAuth(t, oc, nil)
-	for _, alg := range []string{algHS256, algHS384, algHS512} {
-		token := signToken(t, alg, []byte(testWideSecret), "", testClaims())
-		if _, err := a.validateToken(t.Context(), token, time.Unix(testUnix, 0)); err != nil {
-			t.Errorf("validateToken(%s under a 64-byte secret) = %v, want nil", alg, err)
+	synctest.Test(t, func(t *testing.T) {
+		time.Sleep(time.Until(time.Unix(testUnix, 0)))
+		oc := hmacOAuth()
+		oc.HMACSecret = secret.New(testWideSecret)
+		a := newTestOAuth(t, oc, nil)
+		for _, alg := range []string{algHS256, algHS384, algHS512} {
+			token := signToken(t, alg, []byte(testWideSecret), "", testClaims())
+			if _, err := a.validateToken(t.Context(), token); err != nil {
+				t.Errorf("validateToken(%s under a 64-byte secret) = %v, want nil", alg, err)
+			}
 		}
-	}
+	})
 }
 
 func TestOAuthAuthenticatorTokenFailure(t *testing.T) {
@@ -647,7 +686,7 @@ func wrapError(err error) error {
 	return fmt.Errorf("detail: %w", err)
 }
 
-// FuzzOAuthAuthenticatorValidateToken checks every token against
+// FuzzOAuthAuthenticatorValidateToken checks every token, at testUnix, against
 // referenceValidate: the identity of a token it accepts, else its refusal
 // class.
 func FuzzOAuthAuthenticatorValidateToken(f *testing.F) {
@@ -665,11 +704,14 @@ func FuzzOAuthAuthenticatorValidateToken(f *testing.F) {
 	oc.HMACSecret, oc.ClockSkew = secret.New(testWideSecret), policySkew*time.Second
 	a := newTestOAuth(f, oc, nil)
 	f.Fuzz(func(t *testing.T, token string) {
-		id, err := a.validateToken(t.Context(), token, time.Unix(testUnix, 0))
-		want, wantErr := referenceValidate(token)
-		if got := outcomeOf(id); !errors.Is(err, wantErr) || (wantErr == nil) != (err == nil) || got != want {
-			t.Fatalf("validateToken(%q) = %+v, %v; want %+v, %v", token, got, err, want, wantErr)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			time.Sleep(time.Until(time.Unix(testUnix, 0)))
+			id, err := a.validateToken(t.Context(), token)
+			want, wantErr := referenceValidate(token)
+			if got := outcomeOf(id); !errors.Is(err, wantErr) || (wantErr == nil) != (err == nil) || got != want {
+				t.Fatalf("validateToken(%q) = %+v, %v; want %+v, %v", token, got, err, want, wantErr)
+			}
+		})
 	})
 }
 
@@ -719,18 +761,17 @@ func TestOAuthAuthenticatorValidateTokenAllocs(t *testing.T) {
 	oc := hmacOAuth()
 	oc.HMACSecret = secret.New(testWideSecret)
 	f := newJWKSFixture(t)
-	now := time.Unix(testUnix, 0)
 	for _, tc := range []struct {
 		alg   string
 		a     *oauthAuthenticator
 		token string
 	}{
-		{algHS256, newTestOAuth(t, oc, nil), signToken(t, algHS256, []byte(testWideSecret), "", testClaims())},
-		{algEdDSA, newTestOAuth(t, jwksOAuth(f.srv.URL), nil), f.sign(t, algEdDSA, testClaims())},
+		{algHS256, newTestOAuth(t, oc, nil), signToken(t, algHS256, []byte(testWideSecret), "", liveClaims())},
+		{algEdDSA, newTestOAuth(t, jwksOAuth(testJWKSURL), f.srv.client()), f.sign(t, algEdDSA, liveClaims())},
 	} {
 		t.Run(tc.alg, func(t *testing.T) {
 			assertAllocs(t, verifiedTokenAllocs, func() {
-				if _, err := tc.a.validateToken(t.Context(), tc.token, now); err != nil {
+				if _, err := tc.a.validateToken(t.Context(), tc.token); err != nil {
 					t.Fatalf("validateToken(%s) = %v, want an identity", tc.alg, err)
 				}
 			})
@@ -739,31 +780,30 @@ func TestOAuthAuthenticatorValidateTokenAllocs(t *testing.T) {
 }
 
 func BenchmarkOAuthAuthenticatorValidateToken(b *testing.B) {
-	now := time.Unix(testUnix, 0)
 	bench := func(a *oauthAuthenticator, alg, token string) {
 		b.Run(alg, func(b *testing.B) {
-			if id, err := a.validateToken(b.Context(), token, now); err != nil || id.subject != testUser {
+			if id, err := a.validateToken(b.Context(), token); err != nil || id.subject != testUser {
 				b.Fatalf("validateToken = %v, %v, want %s", id, err, testUser)
 			}
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := a.validateToken(b.Context(), token, now); err != nil {
+				if _, err := a.validateToken(b.Context(), token); err != nil {
 					b.Fatalf("validateToken = %v, want nil", err)
 				}
 			}
 		})
 	}
 	f := newJWKSFixture(b)
-	jwks := newTestOAuth(b, jwksOAuth(f.srv.URL), nil)
+	jwks := newTestOAuth(b, jwksOAuth(testJWKSURL), f.srv.client())
 	for _, alg := range []string{
 		algRS256, algRS384, algRS512, algPS256, algPS384, algPS512, algES256, algES384, algES512, algEdDSA,
 	} {
-		bench(jwks, alg, f.sign(b, alg, testClaims()))
+		bench(jwks, alg, f.sign(b, alg, liveClaims()))
 	}
 	oc := hmacOAuth()
 	oc.HMACSecret = secret.New(testWideSecret)
 	mac := newTestOAuth(b, oc, nil)
 	for _, alg := range []string{algHS256, algHS384, algHS512} {
-		bench(mac, alg, signToken(b, alg, []byte(testWideSecret), "", testClaims()))
+		bench(mac, alg, signToken(b, alg, []byte(testWideSecret), "", liveClaims()))
 	}
 }

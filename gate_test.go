@@ -197,8 +197,8 @@ func TestGateKeysUnavailable(t *testing.T) {
 func TestGateMiddlewareKeyRefetchFails(t *testing.T) {
 	key := testRSAKey()
 	srv := newJWKSServer(t, jwksDocument(t, publicJWK(t, key, map[string]any{memberKid: "a"})))
-	h := mustGate(t, &Config{Mode: ModeOAuth, OAuth: OAuthConfig{Issuer: testIssuerURL, Audience: "a",
-		JWKSURL: srv.URL}}).Middleware(http.NotFoundHandler())
+	h := mustGate(t, &Config{Mode: ModeOAuth, HTTPClient: srv.client(), OAuth: OAuthConfig{Issuer: testIssuerURL,
+		Audience: "a", JWKSURL: testJWKSURL}}).Middleware(http.NotFoundHandler())
 	claims := map[string]any{claimIss: testIssuerURL, claimAud: "a", claimExp: time.Now().Add(time.Hour).Unix()}
 	for _, st := range []struct {
 		kid   string
@@ -428,8 +428,8 @@ func unavailableKeys(tb testing.TB) *Config {
 	tb.Helper()
 	down := newJWKSServer(tb, nil)
 	down.set(http.StatusInternalServerError, nil)
-	return &Config{Mode: ModeOAuth, OAuth: OAuthConfig{Issuer: testIssuerURL, Audience: testMCPServer,
-		JWKSURL: down.URL}}
+	return &Config{Mode: ModeOAuth, HTTPClient: down.client(), OAuth: OAuthConfig{Issuer: testIssuerURL,
+		Audience: testMCPServer, JWKSURL: testJWKSURL}}
 }
 
 // TestGateCheckHandlerDenyAllocs refuses a static bearer token without

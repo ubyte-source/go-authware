@@ -15,10 +15,10 @@ import (
 	"time"
 )
 
-// newTestKeySource fetches jwksURL, or discovers it from issuerURL, with the
-// default cache TTL.
-func newTestKeySource(issuerURL, jwksURL string) *keySource {
-	cfg := &Config{OAuth: OAuthConfig{
+// newTestKeySource fetches jwksURL, or discovers it from issuerURL, through
+// client, with the default cache TTL.
+func newTestKeySource(client *http.Client, issuerURL, jwksURL string) *keySource {
+	cfg := &Config{HTTPClient: client, OAuth: OAuthConfig{
 		Issuer: issuerURL, JWKSURL: jwksURL, KeysCacheTTL: defaultKeysCacheTTL, FetchTimeout: time.Second,
 	}}
 	return newKeySource(&cfg.OAuth, newIssuer(cfg))
@@ -38,8 +38,8 @@ func TestNewKeySourceLogsFailures(t *testing.T) {
 	srv := newJWKSServer(t, nil)
 	srv.set(http.StatusInternalServerError, nil)
 	var logs logCapture
-	cfg := withDefaults(&Config{ErrorLog: slog.New(&logs), OAuth: OAuthConfig{
-		Issuer: testIssuerURL, JWKSURL: srv.URL + testJWKSPath,
+	cfg := withDefaults(&Config{ErrorLog: slog.New(&logs), HTTPClient: srv.client(), OAuth: OAuthConfig{
+		Issuer: testIssuerURL, JWKSURL: testJWKSURL,
 	}})
 	s := newKeySource(&cfg.OAuth, newIssuer(cfg))
 	if _, err := s.get(t.Context(), time.Unix(testUnix, 0)); !errors.Is(err, ErrKeysUnavailable) ||
@@ -110,7 +110,7 @@ func runKeyStepsRS256(t *testing.T, s *keySource, srv *jwksServer, steps []keySt
 // once per retry.After, until a rotation publishes the kid.
 func TestKeySourceKey(t *testing.T) {
 	srv := newJWKSServer(t, jwksDocument(t, publicJWK(t, testRSAKey(), map[string]any{memberKid: "a"})))
-	s := newTestKeySource("", srv.URL)
+	s := newTestKeySource(srv.client(), "", testJWKSURL)
 	runKeyStepsRS256(t, s, srv, []keyStep{
 		{at: 0, kid: "a", served: 1},
 		{at: time.Second, kid: "b", want: errNoKey, served: 2},
@@ -129,7 +129,7 @@ func TestKeySourceKey(t *testing.T) {
 // the failure backs off, an unknown kid finds the keys unavailable again.
 func TestKeySourceKeyRefetchFails(t *testing.T) {
 	srv := newJWKSServer(t, jwksDocument(t, publicJWK(t, testRSAKey(), map[string]any{memberKid: "a"})))
-	s := newTestKeySource("", srv.URL)
+	s := newTestKeySource(srv.client(), "", testJWKSURL)
 	runKeyStepsRS256(t, s, srv, []keyStep{{at: 0, kid: "a", served: 1}})
 	srv.set(http.StatusServiceUnavailable, nil)
 	key, err := s.key(t.Context(), "b", mustAlgorithm(t, algRS256), time.Unix(testUnix, 0))
@@ -200,7 +200,7 @@ const unknownKid = "z"
 func TestKeySourceGetBackingOff(t *testing.T) {
 	srv := newJWKSServer(t, nil)
 	srv.set(http.StatusServiceUnavailable, nil)
-	s := newTestKeySource("", srv.URL)
+	s := newTestKeySource(srv.client(), "", testJWKSURL)
 	now := time.Unix(testUnix, 0)
 	if _, err := s.get(t.Context(), now); !errorMatches(err, statusError(http.StatusServiceUnavailable)) {
 		t.Fatalf("get = %v, want the 503", err)
@@ -220,7 +220,7 @@ func TestKeySourceGetBackingOff(t *testing.T) {
 // forced backs off, with the refusal built once.
 func TestKeySourceKeyRefetchBackingOff(t *testing.T) {
 	srv := newJWKSServer(t, jwksDocument(t, publicJWK(t, testRSAKey(), nil)))
-	s := newTestKeySource("", srv.URL)
+	s := newTestKeySource(srv.client(), "", testJWKSURL)
 	now, alg := time.Unix(testUnix, 0), mustAlgorithm(t, algRS256)
 	if _, err := s.get(t.Context(), now); err != nil {
 		t.Fatalf("get = %v, want the key set", err)
@@ -246,7 +246,8 @@ func TestKeySourceKeyRefetchBackingOff(t *testing.T) {
 func TestKeySourceKeyUnavailable(t *testing.T) {
 	srv := newJWKSServer(t, nil)
 	srv.set(http.StatusServiceUnavailable, nil)
-	key, err := newTestKeySource("", srv.URL).key(t.Context(), "", mustAlgorithm(t, algRS256), time.Unix(testUnix, 0))
+	s := newTestKeySource(srv.client(), "", testJWKSURL)
+	key, err := s.key(t.Context(), "", mustAlgorithm(t, algRS256), time.Unix(testUnix, 0))
 	if !errors.Is(err, ErrKeysUnavailable) || !errorMatches(err, statusError(http.StatusServiceUnavailable)) ||
 		key != nil {
 		t.Fatalf("key = %v, %v, want ErrKeysUnavailable caused by the 503", key, err)
@@ -270,7 +271,7 @@ func TestKeySourceGet(t *testing.T) {
 	for _, tc := range tests {
 		srv := newJWKSServer(t, nil)
 		srv.set(tc.status, tc.body)
-		set, err := newTestKeySource("", srv.URL).get(t.Context(), time.Unix(testUnix, 0))
+		set, err := newTestKeySource(srv.client(), "", testJWKSURL).get(t.Context(), time.Unix(testUnix, 0))
 		var ae *authError
 		if !errorMatches(err, tc.want) || !errors.As(err, &ae) || ae.status != http.StatusServiceUnavailable ||
 			set != nil {
@@ -278,7 +279,7 @@ func TestKeySourceGet(t *testing.T) {
 		}
 	}
 	srv := newJWKSServer(t, good)
-	set, err := newTestKeySource("", srv.URL).get(t.Context(), time.Unix(testUnix, 0))
+	set, err := newTestKeySource(srv.client(), "", testJWKSURL).get(t.Context(), time.Unix(testUnix, 0))
 	if err != nil || len(set.keys) != 1 {
 		t.Fatalf("get = %+v, %v, want the one key", set, err)
 	}
@@ -302,34 +303,34 @@ func TestKeySourceFetch(t *testing.T) {
 		testOpenIDConfiguration: func(b string) string { return metadataDoc(b, b) },
 		testJWKSPath:            func(string) string { return string(jwks) },
 	})
-	if set, err := newTestKeySource(srv.URL, "").fetch(t.Context(), now); err != nil || len(set.keys) != 1 {
+	if set, err := newTestKeySource(nil, srv.URL, "").fetch(t.Context(), now); err != nil || len(set.keys) != 1 {
 		t.Fatalf("fetch = %+v, %v, want the one key", set, err)
 	}
-	elsewhere := newJWKSServer(t, jwks)
+	elsewhere := newMetadataServer(t, nil)
 	offOrigin := newMetadataServer(t, map[string]func(string) string{
 		testOpenIDConfiguration: func(b string) string {
 			return strings.Replace(metadataDoc(b, b), `"`+b+`/jwks"`, `"`+elsewhere.URL+`"`, 1)
 		},
 	})
-	err := fetchFailure(t, newTestKeySource(offOrigin.URL, ""), now)
-	if !errors.Is(err, errCrossOrigin) || elsewhere.hits.Load() != 0 {
-		t.Fatalf("fetch(off-origin jwks_uri) = %v after %d requests, want errCrossOrigin before any", err,
-			elsewhere.hits.Load())
+	err := fetchFailure(t, newTestKeySource(nil, offOrigin.URL, ""), now)
+	if !errors.Is(err, errCrossOrigin) || len(elsewhere.paths) != 0 {
+		t.Fatalf("fetch(off-origin jwks_uri) = %v after requests for %q, want errCrossOrigin before any", err,
+			elsewhere.paths)
 	}
 	noJWKS := newMetadataServer(t, map[string]func(string) string{
 		testOpenIDConfiguration: func(b string) string { return `{"issuer":"` + b + `"}` },
 	})
-	err = fetchFailure(t, newTestKeySource(noJWKS.URL, ""), now)
+	err = fetchFailure(t, newTestKeySource(nil, noJWKS.URL, ""), now)
 	for _, want := range []error{errNoJWKSURI, errDiscovery, errMetadata} {
 		if !errors.Is(err, want) {
 			t.Fatalf("fetch(no jwks_uri) = %v, want errNoJWKSURI, which wraps errDiscovery and errMetadata", err)
 		}
 	}
-	err = fetchFailure(t, newTestKeySource(noJWKS.URL+"/other", ""), now)
+	err = fetchFailure(t, newTestKeySource(nil, noJWKS.URL+"/other", ""), now)
 	if !errorMatches(err, statusError(http.StatusNotFound)) || !errors.Is(err, errDiscovery) {
 		t.Fatalf("fetch(no metadata) = %v, want errDiscovery caused by the 404", err)
 	}
-	err = fetchFailure(t, newTestKeySource("", noJWKS.URL+testJWKSPath), now)
+	err = fetchFailure(t, newTestKeySource(nil, "", noJWKS.URL+testJWKSPath), now)
 	if !errorMatches(err, statusError(http.StatusNotFound)) {
 		t.Fatalf("fetch(no JWKS) = %v, want the 404", err)
 	}
@@ -343,7 +344,7 @@ func TestKeySourceFetchCachesMetadata(t *testing.T) {
 		testOpenIDConfiguration: func(b string) string { return metadataDoc(b, b) },
 		testJWKSPath:            func(string) string { return string(jwks) },
 	})
-	s := newTestKeySource(srv.URL, "")
+	s := newTestKeySource(nil, srv.URL, "")
 	now := time.Unix(testUnix, 0)
 	for _, at := range []time.Duration{0, time.Second, defaultKeysCacheTTL} {
 		if _, err := s.fetch(t.Context(), now.Add(at)); err != nil {
@@ -359,7 +360,7 @@ func TestKeySourceFetchCachesMetadata(t *testing.T) {
 func TestKeySourceFetchSizeLimit(t *testing.T) {
 	jwks := jwksDocument(t, publicJWK(t, testRSAKey(), nil))
 	exact := newJWKSServer(t, slices.Concat(bytes.Repeat([]byte(" "), 1<<20-len(jwks)), jwks))
-	set, err := newTestKeySource("", exact.URL).fetch(t.Context(), time.Unix(testUnix, 0))
+	set, err := newTestKeySource(exact.client(), "", testJWKSURL).fetch(t.Context(), time.Unix(testUnix, 0))
 	if err != nil || len(set.keys) != 1 {
 		t.Fatalf("fetch(1 MiB JWKS) = %+v, %v, want the one key", set, err)
 	}
@@ -370,7 +371,7 @@ func TestKeySourceFetchSizeLimit(t *testing.T) {
 func refetchedKeySource(b *testing.B, alg algorithm, now time.Time) (*keySource, *jwksServer) {
 	b.Helper()
 	srv := newJWKSServer(b, jwksDocument(b, publicJWK(b, testRSAKey(), map[string]any{memberKid: "a"})))
-	s := newTestKeySource("", srv.URL)
+	s := newTestKeySource(srv.client(), "", testJWKSURL)
 	if _, err := s.key(b.Context(), "b", alg, now); !errors.Is(err, errNoKey) {
 		b.Fatalf("key(b) = %v, want errNoKey", err)
 	}
@@ -427,7 +428,7 @@ func BenchmarkKeySourceKeyParallel(b *testing.B) {
 
 func BenchmarkKeySourceGet(b *testing.B) {
 	srv := newJWKSServer(b, jwksDocument(b, publicJWK(b, testRSAKey(), map[string]any{memberKid: "a"})))
-	s := newTestKeySource("", srv.URL)
+	s := newTestKeySource(srv.client(), "", testJWKSURL)
 	now := time.Unix(testUnix, 0)
 	if _, err := s.get(b.Context(), now); err != nil {
 		b.Fatalf("get = %v, want the key set", err)

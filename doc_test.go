@@ -229,6 +229,7 @@ const (
 	testReadW      = "read write"
 	testClientID   = "client-id"
 	testIssuerURL  = "https://issuer.example.com"
+	testIssuerHost = "issuer.example.com"
 	testJWKSURL    = "https://issuer.example.com/jwks"
 	testHTTPS      = "https://example.com"
 	testTypeJSON   = "application/json"
@@ -609,16 +610,35 @@ func jwksDocument(tb testing.TB, keys ...map[string]any) []byte {
 	return []byte(mustJSON(tb, map[string]any{"keys": keys}))
 }
 
+// hostTransport serves each outbound request with the handler of its host.
+type hostTransport map[string]http.Handler
+
+// RoundTrip serves r with the handler of its host, or fails for another host.
+func (t hostTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	h, ok := t[r.URL.Host]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", errNoRoute, r.URL.Host)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if r.Body != nil {
+		if err := r.Body.Close(); err != nil {
+			return nil, fmt.Errorf("close request body: %w", err)
+		}
+	}
+	return w.Result(), nil
+}
+
 // jwksReply is the status and body a jwksServer answers with.
 type jwksReply struct {
 	status int
 	body   []byte
 }
 
-// jwksServer serves a swappable reply and counts its requests.
+// jwksServer answers every request with a swappable reply and counts them. It
+// serves in process, through the client it returns, so a bubble can wait on it.
 type jwksServer struct {
-	*httptest.Server
-
+	tb    testing.TB
 	reply atomic.Pointer[jwksReply]
 	hits  atomic.Int32
 }
@@ -626,20 +646,27 @@ type jwksServer struct {
 // newJWKSServer serves body with status 200 until set swaps the reply.
 func newJWKSServer(tb testing.TB, body []byte) *jwksServer {
 	tb.Helper()
-	s := &jwksServer{}
+	s := &jwksServer{tb: tb}
 	s.set(http.StatusOK, body)
-	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		s.hits.Add(1)
-		reply := s.reply.Load()
-		w.WriteHeader(reply.status)
-		writeBody(tb, w, string(reply.body))
-	}))
-	tb.Cleanup(s.Close)
 	return s
+}
+
+// ServeHTTP counts the request and answers it with the current reply.
+func (s *jwksServer) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	s.hits.Add(1)
+	reply := s.reply.Load()
+	w.WriteHeader(reply.status)
+	writeBody(s.tb, w, string(reply.body))
 }
 
 func (s *jwksServer) set(status int, body []byte) {
 	s.reply.Store(&jwksReply{status: status, body: body})
+}
+
+// client returns a client that sends to s every request for testIssuerHost, the
+// host of testJWKSURL.
+func (s *jwksServer) client() *http.Client {
+	return &http.Client{Transport: hostTransport{testIssuerHost: s}}
 }
 
 // validOAuth returns an HMAC-mode OAuth Config that New accepts.
@@ -880,25 +907,6 @@ func markCounting(n *atomic.Int32, next http.RoundTripper) roundTripFunc {
 		}
 		return next.RoundTrip(r)
 	}
-}
-
-// hostTransport serves each outbound request with the handler of its host.
-type hostTransport map[string]http.Handler
-
-// RoundTrip serves r with the handler of its host, or fails for another host.
-func (t hostTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	h, ok := t[r.URL.Host]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", errNoRoute, r.URL.Host)
-	}
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if r.Body != nil {
-		if err := r.Body.Close(); err != nil {
-			return nil, fmt.Errorf("close request body: %w", err)
-		}
-	}
-	return w.Result(), nil
 }
 
 // stall holds r until its context ends, as an upstream that never answers.

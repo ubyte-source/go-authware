@@ -242,7 +242,7 @@ func (a *oauthAuthenticator) authenticate(r *http.Request) (*Identity, *authErro
 	if e != nil {
 		return nil, e
 	}
-	id, err := a.validateToken(r.Context(), raw, time.Now())
+	id, err := a.validateToken(r.Context(), raw)
 	if err != nil {
 		return nil, a.tokenFailure(err)
 	}
@@ -292,7 +292,8 @@ func tokenText(err error) string {
 	return "invalid token"
 }
 
-func (a *oauthAuthenticator) validateToken(ctx context.Context, raw string, now time.Time) (*Identity, error) {
+func (a *oauthAuthenticator) validateToken(ctx context.Context, raw string) (*Identity, error) {
+	now := time.Now()
 	buf, ok := a.buffers.Get().(*[]byte)
 	if !ok {
 		buf = new([]byte)
