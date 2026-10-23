@@ -56,7 +56,8 @@ race: ## Run the tests with the race detector and write coverage.out
 
 cover: race ## Write coverage.html from the race run; fail when statement coverage is below 100%
 	$(GO) tool cover -html=coverage.out -o coverage.html
-	@$(GO) tool cover -func=coverage.out | awk '$$1 == "total:" {print; full = $$3 == "100.0%"} END {exit !full}'
+	@$(GO) tool cover -func=coverage.out | awk '$$1 == "total:"'
+	@awk 'NR > 1 && $$2 > 0 && $$3 == 0 {print "not covered:", $$1; missed = 1} END {exit missed}' coverage.out
 
 bench: ## Run every benchmark
 	$(GO) test -run='^$$' -bench=. -benchmem ./...
