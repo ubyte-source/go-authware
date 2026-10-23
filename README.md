@@ -611,10 +611,11 @@ import "github.com/ubyte-source/go-authware/v2/replay"
 Three headers carry the envelope: `X-Auth-Timestamp` (Unix seconds),
 `X-Auth-Nonce` (16 random bytes, hex) and `X-Auth-Signature` (hex
 HMAC-SHA256). The signed input joins six lines: method, host with ASCII
-letters lowercased and without an IPv6 zone (net/http drops it from the
-wire), request URI (escaped path and raw query), hex SHA-256 of the body,
-timestamp and nonce. Sign the host and URI the verifier receives: a proxy
-that rewrites either breaks verification.
+letters lowercased and without an IPv6 zone (net/http sends a zone over
+HTTP/2 and cuts it from its last `%` over HTTP/1.1), request URI (escaped
+path and raw query), hex SHA-256 of the body, timestamp and nonce. Sign
+the host and URI the verifier receives: a proxy that rewrites either
+breaks verification.
 
 ```go
 const capacity, window = 8192, 5 * time.Minute
