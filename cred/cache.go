@@ -132,13 +132,14 @@ func (c *CachedSource) Token(ctx context.Context) (*Token, error) {
 // Invalidate drops stale while it is the cached token, at most once every
 // 30s, so the next Token call refreshes; any other token is left alone.
 func (c *CachedSource) Invalidate(stale *Token) {
-	c.drop(c.cur.Load(), stale, time.Now())
+	c.drop(c.cur.Load(), stale)
 }
 
-// drop swaps seen, the entry cached at now, for an entry without a token when
-// seen holds stale and allows a drop, so the drop and the pause it starts are
+// drop swaps seen, the entry its caller loaded, for an entry without a token when
+// seen holds stale and allows a drop now, so the drop and the pause it starts are
 // published at once; a cache that moved on since seen keeps its entry.
-func (c *CachedSource) drop(seen *entry, stale *Token, now time.Time) {
+func (c *CachedSource) drop(seen *entry, stale *Token) {
+	now := time.Now()
 	if seen != nil && seen.tok != nil && seen.tok == stale && !now.Before(seen.nextDrop) {
 		c.cur.CompareAndSwap(seen, &entry{nextDrop: now.Add(retry.After)})
 	}

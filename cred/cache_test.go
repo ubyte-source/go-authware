@@ -606,15 +606,15 @@ func TestCachedSourceDrop(t *testing.T) {
 		c, src := newCache(t, 0)
 		first := nextToken(t, c)
 		seen, now := c.cur.Load(), time.Now()
-		c.drop(seen, first, now)
+		c.drop(seen, first)
 		dropped := c.cur.Load()
-		c.drop(seen, first, now)
+		c.drop(seen, first)
 		if got := c.cur.Load(); got != dropped || got.tok != nil || !got.nextDrop.Equal(now.Add(pause)) {
 			t.Fatalf("second drop of the entry both saw = %+v, want the first drop %+v, its pause ending in 30s",
 				got, dropped)
 		}
 		time.Sleep(pause)
-		c.drop(dropped, nil, time.Now())
+		c.drop(dropped, nil)
 		if got := c.cur.Load(); got != dropped {
 			t.Fatalf("drop(nil) of an entry without a token = %+v, want %+v kept", got, dropped)
 		}
@@ -622,7 +622,7 @@ func TestCachedSourceDrop(t *testing.T) {
 			t.Fatalf("Token after the drops = %s after %d calls, want %s after 2", got, src.calls.Load(), seq2)
 		}
 		refreshed := c.cur.Load()
-		c.drop(seen, first, time.Now())
+		c.drop(seen, first)
 		if got := c.cur.Load(); got != refreshed || got.tok.Value.Reveal() != seq2 {
 			t.Fatalf("drop of the entry seen before the refresh = %+v, want %+v kept", got, refreshed)
 		}
