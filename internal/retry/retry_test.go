@@ -1,21 +1,15 @@
 package retry
 
 import (
-	"runtime"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// An instant, a day, the documented 30s pause, and the rounds and concurrent
-// claims of the race test.
+// An instant, a day and the documented 30s pause.
 const (
 	epochSeconds = 1_800_000_000
 	day          = 24 * time.Hour
 	pause        = 30 * time.Second
-	rounds       = 50
-	claimers     = 64
 )
 
 // epoch is the instant the tests start their pauses at.
@@ -62,53 +56,46 @@ func TestBackoffReset(t *testing.T) {
 	}
 }
 
+// TestBackoffClaim claims at instants inside and past each pause: a claim past
+// the end of the pause starts one of 30s, any other leaves the pause as it is.
 func TestBackoffClaim(t *testing.T) {
 	t.Parallel()
 	var b Backoff
-	for i, st := range []struct {
-		at   time.Duration
-		want bool
-	}{
-		{0, true}, {0, false}, {pause - time.Nanosecond, false}, {pause, true},
-		{2*pause - time.Nanosecond, false}, {2 * pause, true},
+	for i, st := range []struct{ at, end time.Duration }{
+		{0, pause}, {0, pause}, {pause - time.Nanosecond, pause}, {pause, 2 * pause},
+		{2*pause - time.Nanosecond, 2 * pause}, {2 * pause, 2*pause + pause},
 	} {
-		if got := b.Claim(epoch().Add(st.at)); got != st.want {
-			t.Fatalf("step %d: Claim(+%v) = %v, want %v", i, st.at, got, st.want)
+		b.Claim(epoch().Add(st.at))
+		last, ended := b.Waiting(epoch().Add(st.end-time.Nanosecond)), b.Waiting(epoch().Add(st.end))
+		if !last || ended {
+			t.Fatalf("step %d: after Claim(+%v), Waiting(+%v - 1ns) = %t and Waiting(+%v) = %t; want true, then false",
+				i, st.at, st.end, last, st.end, ended)
 		}
 	}
 	var failed Backoff
 	failed.Fail(epoch())
-	if failed.Claim(epoch().Add(pause-time.Nanosecond)) || !failed.Claim(epoch().Add(pause)) {
-		t.Fatal("Claim during the pause of a failure = true, or after it = false; want false, then true")
+	failed.Claim(epoch().Add(pause - time.Nanosecond))
+	if got := failed.Waiting(epoch().Add(pause)); got {
+		t.Fatalf("Claim during the pause of a failure, then Waiting(end of that pause) = %t, want false", got)
+	}
+	failed.Claim(epoch().Add(pause))
+	last, ended := failed.Waiting(epoch().Add(2*pause-time.Nanosecond)), failed.Waiting(epoch().Add(2*pause))
+	if !last || ended {
+		t.Fatalf("Claim at the end of the pause of a failure, then Waiting just before and at 30s later = %t, %t; "+
+			"want true, then false", last, ended)
 	}
 }
 
-// TestBackoffClaimConcurrent releases 64 spinning claims at one instant, round
-// after round: exactly one claim of each round wins.
-func TestBackoffClaimConcurrent(t *testing.T) {
+// TestBackoffClaimAfterConcurrentFail replays a claim whose load a Fail follows
+// before its swap: the claim starts no pause, and the pause of the failure stays.
+func TestBackoffClaimAfterConcurrentFail(t *testing.T) {
 	t.Parallel()
-	for round := range rounds {
-		var b Backoff
-		var wins atomic.Int32
-		var start atomic.Bool
-		var ready, done sync.WaitGroup
-		for range claimers {
-			ready.Add(1)
-			done.Go(func() {
-				ready.Done()
-				for !start.Load() {
-					runtime.Gosched()
-				}
-				if b.Claim(epoch()) {
-					wins.Add(1)
-				}
-			})
-		}
-		ready.Wait()
-		start.Store(true)
-		done.Wait()
-		if n := wins.Load(); n != 1 {
-			t.Fatalf("round %d: concurrent claims won %d times, want 1", round, n)
-		}
+	var b Backoff
+	loaded := b.until.Load()
+	b.Fail(epoch().Add(time.Second))
+	b.claimAfter(loaded, epoch())
+	if kept, ended := b.Waiting(epoch().Add(pause)), b.Waiting(epoch().Add(time.Second+pause)); !kept || ended {
+		t.Fatalf("Waiting at the end of the claim's pause and of the failure's = %t, %t; want true, then false: "+
+			"the pause of the failure", kept, ended)
 	}
 }

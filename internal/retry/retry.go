@@ -30,10 +30,17 @@ func (b *Backoff) Reset() {
 }
 
 // Claim starts a pause at now unless now comes before the end of the current one or a
-// concurrent call changes the pause first, and reports whether it did.
-func (b *Backoff) Claim(now time.Time) bool {
-	last := b.until.Load()
-	return !inside(last, now) && b.until.CompareAndSwap(last, pauseFrom(now))
+// concurrent call changes the pause first.
+func (b *Backoff) Claim(now time.Time) {
+	b.claimAfter(b.until.Load(), now)
+}
+
+// claimAfter starts a pause at now unless now comes before last, the end of the pause
+// its caller loaded, or the pause has changed since that load.
+func (b *Backoff) claimAfter(last *time.Time, now time.Time) {
+	if !inside(last, now) {
+		b.until.CompareAndSwap(last, pauseFrom(now))
+	}
 }
 
 // inside reports whether now comes before until, the end of a pause.
