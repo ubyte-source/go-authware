@@ -75,3 +75,6 @@ func outbound(tb testing.TB, payload io.Reader) *http.Request {
 	r.GetBody = nil
 	return r
 }
+
+// wireLimit is the largest body limit the module passes, 1 MiB.
+const wireLimit = 1 << 20

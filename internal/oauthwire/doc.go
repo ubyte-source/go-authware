@@ -8,5 +8,5 @@
 // caller-supplied non-redirecting client, which reads the status of an answer
 // before its body, and the token answer of any status ([Send]) the facade relays.
 // Each caller passes the errors that report its failures. No argument may be nil
-// unless its godoc says what nil means.
+// unless its godoc says what nil means, and no byte limit is math.MaxInt64.
 package oauthwire

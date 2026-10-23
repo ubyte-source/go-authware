@@ -44,7 +44,7 @@ func TestReadRequestRoom(t *testing.T) {
 	}{
 		{testLimit, testLimit + 1}, {-1, bytes.MinRead}, {overHint, readHint + 1}, {math.MaxInt64, bytes.MinRead},
 	} {
-		got, err := ReadRequest(inbound(t, atLimit, tc.declared), 1<<20, errTooLarge)
+		got, err := ReadRequest(inbound(t, atLimit, tc.declared), wireLimit, errTooLarge)
 		if err != nil || cap(got) != tc.room {
 			t.Errorf("ReadRequest(5 bytes, declared %d) = %v in %d bytes, want %d: room for the declared length up "+
 				"to 8 KiB when it lies within the limit", tc.declared, err, cap(got), tc.room)
@@ -60,9 +60,9 @@ func TestReadSizedRoom(t *testing.T) {
 		size, limit int64
 		room        int
 	}{
-		{testLimit, testLimit, testLimit + 1}, {readHint, math.MaxInt64, readHint + 1},
-		{readHint + 1, math.MaxInt64, readHint + 1}, {hugeSize, math.MaxInt64, readHint + 1},
-		{math.MaxInt64 - 1, math.MaxInt64, readHint + 1}, {math.MaxInt64, math.MaxInt64, bytes.MinRead},
+		{testLimit, testLimit, testLimit + 1}, {readHint, wireLimit, readHint + 1},
+		{readHint + 1, wireLimit, readHint + 1}, {hugeSize, wireLimit, bytes.MinRead},
+		{math.MaxInt64, wireLimit, bytes.MinRead},
 	} {
 		got, err := ReadSized(strings.NewReader(atLimit), tc.size, tc.limit, errTooLarge)
 		if err != nil || string(got) != atLimit || cap(got) != tc.room {
@@ -123,8 +123,7 @@ func TestReadSized(t *testing.T) {
 }
 
 // TestReadSizedStopsPastLimit refuses an oversized body once the byte past the
-// limit arrives, reading no further, and reads a body whole under the largest
-// limit, even one that declares that limit as its size.
+// limit arrives, reading no further.
 func TestReadSizedStopsPastLimit(t *testing.T) {
 	t.Parallel()
 	const unread = "789"
@@ -133,12 +132,6 @@ func TestReadSizedStopsPastLimit(t *testing.T) {
 		src.Len() != len(unread) {
 		t.Fatalf("ReadSized(9 bytes, limit 5) = %q, %v with %d bytes unread, want errTooLarge with 3", got, err,
 			src.Len())
-	}
-	for _, size := range []int64{0, math.MaxInt64} {
-		got, err := ReadSized(strings.NewReader(atLimit), size, math.MaxInt64, errTooLarge)
-		if err != nil || string(got) != atLimit {
-			t.Errorf("ReadSized(size %d, limit MaxInt64) = %q, %v, want 12345", size, got, err)
-		}
 	}
 }
 

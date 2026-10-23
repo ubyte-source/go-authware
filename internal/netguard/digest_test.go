@@ -127,7 +127,7 @@ func TestDigesterDigestRejects(t *testing.T) {
 }
 
 // TestDigesterDigestLargestLimit digests a buffered body, which declares a size
-// no memory holds, and a streamed copy whole under the largest limit.
+// no memory holds, and a streamed copy whole under the largest limit, wireLimit.
 func TestDigesterDigestLargestLimit(t *testing.T) {
 	t.Parallel()
 	var d Digester
@@ -136,8 +136,8 @@ func TestDigesterDigestLargestLimit(t *testing.T) {
 	streamed := outbound(t, strings.NewReader(atLimit))
 	streamed.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(atLimit)), nil }
 	for name, r := range map[string]*http.Request{"buffered": buffered, "streamed": streamed} {
-		if got, err := d.Digest(r, math.MaxInt64, errTooLarge); got != digest(atLimit) || err != nil {
-			t.Errorf("%s: Digest(limit MaxInt64) = %x, %v, want the digest of 12345", name, got, err)
+		if got, err := d.Digest(r, wireLimit, errTooLarge); got != digest(atLimit) || err != nil {
+			t.Errorf("%s: Digest(limit 1 MiB) = %x, %v, want the digest of 12345", name, got, err)
 		}
 	}
 }

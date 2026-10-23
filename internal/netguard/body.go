@@ -45,7 +45,7 @@ const maxRoom = 8 << 10
 
 // ReadSized reads the body r to the end, failing with tooLarge once more than limit
 // bytes arrive or with the read failure, into room made before the first read for size
-// bytes, up to 8 KiB, when size lies from 1 to limit and below math.MaxInt64.
+// bytes, up to 8 KiB, when size lies from 1 to limit; limit is below math.MaxInt64.
 func ReadSized(r io.Reader, size, limit int64, tooLarge error) ([]byte, error) {
 	lr := boundReader(r, limit)
 	room := int64(bytes.MinRead)
@@ -69,7 +69,7 @@ func ReadSized(r io.Reader, size, limit int64, tooLarge error) ([]byte, error) {
 }
 
 // boundReader reads r up to the first byte past limit, the byte that reveals an
-// oversized body, and up to limit itself at math.MaxInt64.
+// oversized body.
 func boundReader(r io.Reader, limit int64) io.LimitedReader {
-	return io.LimitedReader{R: r, N: max(limit+1, limit)}
+	return io.LimitedReader{R: r, N: limit + 1}
 }

@@ -145,9 +145,9 @@ func TestFetchDeclaredSize(t *testing.T) {
 		body := &closeBody{Reader: strings.NewReader(testBody)}
 		return &http.Response{StatusCode: http.StatusOK, ContentLength: math.MaxInt64 - 1, Body: body}, nil
 	})}
-	got, err := Fetch(client, NewGetRequest(t.Context(), tokenURL()), math.MaxInt64, errTooLarge, refuse)
+	got, err := Fetch(client, NewGetRequest(t.Context(), tokenURL()), MaxTokenBody, errTooLarge, refuse)
 	if err != nil || got != testBody {
-		t.Fatalf("Fetch(Content-Length MaxInt64-1, limit MaxInt64) = %q, %v, want %s", got, err, testBody)
+		t.Fatalf("Fetch(Content-Length MaxInt64-1, limit MaxTokenBody) = %q, %v, want %s", got, err, testBody)
 	}
 }
 

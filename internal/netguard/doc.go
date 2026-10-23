@@ -7,5 +7,6 @@
 // body of a server request and [ReadSized] any other, which [ReadClose] also
 // closes; [Exchange] sends a request and closes the body of its answer, and a
 // [Digester] hashes the body of a client request within a bound and leaves it
-// replayable. No argument may be nil unless its godoc says what nil means.
+// replayable. No argument may be nil unless its godoc says what nil means,
+// and no byte limit is math.MaxInt64.
 package netguard
