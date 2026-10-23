@@ -50,7 +50,7 @@ func TestClaimPolicyValidateClaims(t *testing.T) {
 		{"no subject", claimsWith(map[string]any{claimSub: nil}), "", rw},
 		{"aud array last", claimsWith(map[string]any{claimAud: []string{"x", testMCPServer}}), testUser, rw},
 		{"aud array first", claimsWith(map[string]any{claimAud: []string{testMCPServer, "x"}}), testUser, rw},
-		{"exp 2^53", claimsWith(map[string]any{claimExp: 1 << 53}), testUser, rw},
+		{"exp 2^53", claimsWith(map[string]any{claimExp: int64(maxDate)}), testUser, rw},
 		{"exp at skew", claimsWith(map[string]any{claimExp: testUnix - skew}), testUser, rw},
 		{"exp fraction", claimsWith(map[string]any{claimExp: float64(testUnix-skew) + 0.5}), testUser, rw},
 		{"at skew", claimsWith(map[string]any{testClaimNbf: testUnix + skew, claimIat: testUnix + skew}), testUser, rw},
