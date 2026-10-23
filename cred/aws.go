@@ -113,9 +113,9 @@ type datedKey struct {
 	mac        *keyedmac.MAC
 }
 
-// Unless UnsignedPayload is set, the Sign of sigV4 swaps a body without GetBody for a
-// copy, setting GetBody and ContentLength; when that read fails or passes 1 MiB, r is
-// left with http.NoBody, the Host it set, X-Amz-Date and any session token.
+// sigV4's Sign sets r.Host, X-Amz-* headers and a canonical query; unless
+// UnsignedPayload is set, a body without GetBody becomes a copy, setting GetBody and
+// ContentLength, or http.NoBody if that fails, after Host, X-Amz-Date and token.
 type sigV4 struct {
 	cfg     SigV4Config
 	key     atomic.Pointer[datedKey]
@@ -136,9 +136,9 @@ func NewSigV4(cfg *SigV4Config) (Signer, error) {
 	return &sigV4{cfg: *cfg, s3Paths: s3Service(cfg.Service)}, nil
 }
 
-// Sign signs r at the current time. It sets r.Host without an IPv6 zone or default port
-// and the X-Amz-* headers and canonicalizes the query, so the wire matches; unless
-// UnsignedPayload is set, it hashes a body of at most 1 MiB, from GetBody or buffered.
+// Sign signs r at the current time. A missing host fails with ErrMissingHost before r
+// changes, and a body it hashes that fails to read or close with ErrInvalidBody, one
+// over 1 MiB with it and ErrBodyTooLarge.
 func (s *sigV4) Sign(_ context.Context, r *http.Request) error {
 	host := signingHost(r)
 	if host == "" {
@@ -196,8 +196,9 @@ func (s *sigV4) keyAfter(loaded *datedKey, date string) *datedKey {
 // errBodyToSignTooLarge refuses a body over maxSignedBody, built once.
 var errBodyToSignTooLarge = bodyToSign(ErrBodyTooLarge)
 
-// bodyToSign wraps err, why the body of a request to sign was not hashed.
-func bodyToSign(err error) error { return fmt.Errorf(errPrefix+"read body to sign: %w", err) }
+// bodyToSign wraps err, why the body of a request to sign was not hashed, in
+// ErrInvalidBody.
+func bodyToSign(err error) error { return fmt.Errorf("%w: %w", ErrInvalidBody, err) }
 
 // payloadHash returns UNSIGNED-PAYLOAD when the config says so, and otherwise
 // the hex SHA-256 of the body of r, that of no bytes without one.

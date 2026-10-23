@@ -364,16 +364,61 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 
+// TestSigV4SignErrors refuses a request without a host with ErrMissingHost,
+// leaving its headers as they were.
 func TestSigV4SignErrors(t *testing.T) {
 	s := newTestSigV4(t, testService, "")
 	noHost := newReq(t, http.MethodGet, exampleURL, http.NoBody)
 	noHost.Host, noHost.URL.Host = "", ""
-	if err := s.Sign(t.Context(), noHost); !errors.Is(err, ErrMissingHost) {
-		t.Fatalf("Sign(no host) = %v, want ErrMissingHost", err)
+	if err := s.Sign(t.Context(), noHost); !errors.Is(err, ErrMissingHost) || len(noHost.Header) != 0 {
+		t.Fatalf("Sign(no host) = %v, leaving headers %v; want ErrMissingHost and none", err, noHost.Header)
 	}
-	broken := newReq(t, http.MethodPost, exampleURL, failingReader{})
-	if err := s.Sign(t.Context(), broken); !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("Sign(failing body) = %v, want io.ErrUnexpectedEOF", err)
+}
+
+// errCopy and errBodyClose are the failures of a GetBody and of closing a body.
+var (
+	errCopy      = errors.New("test: GetBody failed")
+	errBodyClose = errors.New("test: close failed")
+)
+
+// unclosable is a body whose Close fails with errBodyClose.
+type unclosable struct{ io.Reader }
+
+func (unclosable) Close() error { return errBodyClose }
+
+// TestSigV4SignRefusesBodies fails each body it cannot hash with ErrInvalidBody and
+// the cause: a buffered body or a GetBody copy that fails to read or close, a failed
+// GetBody, and either over 1 MiB, whose refusal wraps ErrBodyTooLarge.
+func TestSigV4SignRefusesBodies(t *testing.T) {
+	s := newTestSigV4(t, testService, "")
+	over := strings.Repeat(testLetter, mib+1)
+	copied := func(rc io.ReadCloser, err error) func() (io.ReadCloser, error) {
+		return func() (io.ReadCloser, error) { return rc, err }
+	}
+	for _, tc := range []struct {
+		name    string
+		body    io.Reader
+		getBody func() (io.ReadCloser, error)
+		want    error
+	}{
+		{"failing read", failingReader{}, nil, io.ErrUnexpectedEOF},
+		{"failing close", unclosable{strings.NewReader(testData)}, nil, errBodyClose},
+		{"over 1 MiB", struct{ io.Reader }{strings.NewReader(over)}, nil, ErrBodyTooLarge},
+		{"failing GetBody", strings.NewReader(testData), copied(nil, errCopy), errCopy},
+		{"failing copy read", strings.NewReader(testData), copied(io.NopCloser(failingReader{}), nil),
+			io.ErrUnexpectedEOF},
+		{"failing copy close", strings.NewReader(testData), copied(unclosable{strings.NewReader(testData)}, nil),
+			errBodyClose},
+		{"copy over 1 MiB", strings.NewReader(testData), copied(io.NopCloser(strings.NewReader(over)), nil),
+			ErrBodyTooLarge},
+	} {
+		r := newReq(t, http.MethodPut, exampleURL, tc.body)
+		r.GetBody = tc.getBody
+		if err := s.Sign(t.Context(), r); !errors.Is(err, ErrInvalidBody) || !errors.Is(err, tc.want) ||
+			r.Header.Get(authorization) != "" {
+			t.Errorf("Sign(%s) = %v with Authorization %q; want ErrInvalidBody and %v, unsigned", tc.name, err,
+				r.Header.Get(authorization), tc.want)
+		}
 	}
 }
 

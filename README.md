@@ -544,9 +544,11 @@ src, err := cred.NewClientCredentials(&cred.ClientCredentialsConfig{
   each exchange fails with `ErrNoRefreshToken` and reads the store again.
 
 AWS SigV4, verified against the AWS test suite vectors. The signature covers
-the hash of a body of at most 1 MiB; a larger body fails with
-`ErrBodyTooLarge` unless `UnsignedPayload` is set, which only an S3 `Service`
-accepts.
+the hash of a body of at most 1 MiB unless `UnsignedPayload` is set, which
+only an S3 `Service` accepts. `Sign` refuses a request without a host with
+`ErrMissingHost`, before it changes the request, and a body it hashes that
+fails to read or close with an error wrapping `ErrInvalidBody`; the refusal
+of a body over 1 MiB wraps `ErrBodyTooLarge` too.
 
 ```go
 signer, err := cred.NewSigV4(&cred.SigV4Config{

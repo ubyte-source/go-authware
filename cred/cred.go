@@ -37,6 +37,9 @@ var (
 	// ErrInsecureTokenURL reports a token or metadata URL that the outbound
 	// policy refuses, or that carries userinfo; it wraps ErrInvalidConfig.
 	ErrInsecureTokenURL = fmt.Errorf("%w: insecure token URL", ErrInvalidConfig)
+	// ErrInvalidBody reports a request body that a NewSigV4 signer fails to read or
+	// close, or that exceeds 1 MiB.
+	ErrInvalidBody = errors.New(errPrefix + "invalid body")
 	// ErrBodyTooLarge reports a request body over 1 MiB that a NewSigV4 signer
 	// would hash; UnsignedPayload, for the S3 services, signs it unhashed.
 	ErrBodyTooLarge = errors.New("body too large")
