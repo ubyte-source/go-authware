@@ -348,9 +348,11 @@ func TestSigV4SignUnsignedPayload(t *testing.T) {
 	if err := s.Sign(t.Context(), r); err != nil {
 		t.Fatalf(wantSigned, err)
 	}
-	if r.Header.Get(headerContentSHA) != "UNSIGNED-PAYLOAD" || body.closed.Load() || r.Body != body {
-		t.Fatalf("headers %v, body closed %t, want UNSIGNED-PAYLOAD with the body untouched", r.Header,
-			body.closed.Load())
+	if r.Header.Get(headerContentSHA) != "UNSIGNED-PAYLOAD" || body.closed.Load() || r.Body != body ||
+		r.GetBody != nil || r.ContentLength != 0 {
+		t.Fatalf("headers %v, body closed %t, GetBody set %t, ContentLength %d; want UNSIGNED-PAYLOAD with the "+
+			"body untouched, no GetBody and the length 0", r.Header, body.closed.Load(), r.GetBody != nil,
+			r.ContentLength)
 	}
 }
 
@@ -368,6 +370,30 @@ func TestSigV4SignErrors(t *testing.T) {
 	broken := newReq(t, http.MethodPost, exampleURL, failingReader{})
 	if err := s.Sign(t.Context(), broken); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("Sign(failing body) = %v, want io.ErrUnexpectedEOF", err)
+	}
+}
+
+// TestSigV4SignLeavesNoBody signs requests whose body without GetBody fails to
+// read or passes 1 MiB: each is left with http.NoBody, the host, X-Amz-Date and the
+// session token, and no signature.
+func TestSigV4SignLeavesNoBody(t *testing.T) {
+	s := newTestSigV4(t, testService, awsExampleSTS)
+	for _, tc := range []struct {
+		body io.Reader
+		want error
+	}{
+		{failingReader{}, io.ErrUnexpectedEOF},
+		{struct{ io.Reader }{strings.NewReader(strings.Repeat(testLetter, mib+1))}, ErrBodyTooLarge},
+	} {
+		r := newReq(t, http.MethodPut, "https://example.amazonaws.com:443/", tc.body)
+		err := s.Sign(t.Context(), r)
+		if !errors.Is(err, tc.want) || r.Body != http.NoBody || r.Host != "example.amazonaws.com" ||
+			r.Header.Get(headerAmzDate) == "" || r.Header.Get("X-Amz-Security-Token") != awsExampleSTS ||
+			r.Header.Get(authorization) != "" {
+			t.Errorf("Sign(%T body) = %v, leaving body %v, host %q and headers %v; want %v, http.NoBody, "+
+				"example.amazonaws.com, X-Amz-Date and the token, unsigned", tc.body, err, r.Body, r.Host, r.Header,
+				tc.want)
+		}
 	}
 }
 

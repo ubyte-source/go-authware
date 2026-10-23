@@ -113,7 +113,9 @@ type datedKey struct {
 	mac        *keyedmac.MAC
 }
 
-// sigV4 signs requests with AWS Signature Version 4.
+// Unless UnsignedPayload is set, the Sign of sigV4 swaps a body without GetBody for a
+// copy, setting GetBody and ContentLength; when that read fails or passes 1 MiB, r is
+// left with http.NoBody, the Host it set, X-Amz-Date and any session token.
 type sigV4 struct {
 	cfg     SigV4Config
 	key     atomic.Pointer[datedKey]
