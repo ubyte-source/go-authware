@@ -320,8 +320,10 @@ func TestKeySourceFetch(t *testing.T) {
 		testOpenIDConfiguration: func(b string) string { return `{"issuer":"` + b + `"}` },
 	})
 	err = fetchFailure(t, newTestKeySource(noJWKS.URL, ""), now)
-	if !errors.Is(err, errNoJWKSURI) || !errors.Is(err, errMetadata) {
-		t.Fatalf("fetch(no jwks_uri) = %v, want errNoJWKSURI, which wraps errDiscovery and errMetadata", err)
+	for _, want := range []error{errNoJWKSURI, errDiscovery, errMetadata} {
+		if !errors.Is(err, want) {
+			t.Fatalf("fetch(no jwks_uri) = %v, want errNoJWKSURI, which wraps errDiscovery and errMetadata", err)
+		}
 	}
 	err = fetchFailure(t, newTestKeySource(noJWKS.URL+"/other", ""), now)
 	if !errorMatches(err, statusError(http.StatusNotFound)) || !errors.Is(err, errDiscovery) {
