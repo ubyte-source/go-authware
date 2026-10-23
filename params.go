@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strings"
 
 	"github.com/ubyte-source/go-authware/v2/internal/oauthwire"
@@ -116,12 +115,14 @@ func (p *paramPolicy) allowlisted(vals url.Values, names ...string) url.Values {
 // false on the first scope the policy refuses.
 func (p *paramPolicy) qualify(scopes []string) (string, bool) {
 	out := make([]string, 0, len(scopes))
+	seen := make(map[string]struct{}, len(scopes))
 	for _, s := range scopes {
 		q, ok := p.qualifyScope(s)
 		if !ok {
 			return "", false
 		}
-		if !slices.Contains(out, q) {
+		if _, repeat := seen[q]; !repeat {
+			seen[q] = struct{}{}
 			out = append(out, q)
 		}
 	}
