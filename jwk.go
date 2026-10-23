@@ -98,8 +98,14 @@ func (s *jwkSet) match(kid string, alg algorithm) (verificationKey, error) {
 	return found, nil
 }
 
-// parseJWKS parses a JWK Set, skipping keys it cannot use; a set without a
-// usable key is an error that joins the reasons of every skipped key.
+// maxSkippedReasons bounds the reasons a refusal of a JWKS without a usable key keeps,
+// those of its first unusable keys; it counts the others, so its text and size are
+// bounded whatever the number of keys.
+const maxSkippedReasons = 3
+
+// parseJWKS parses a JWK Set, skipping keys it cannot use; a set without a usable key
+// is an error that joins the reasons of its first maxSkippedReasons skipped keys and,
+// past them, the count of all.
 func parseJWKS(data string) (*jwkSet, error) {
 	var keys string
 	err := jsonobj.Iterate(data, errJWKSShape, func(name, value string) error {
@@ -112,11 +118,15 @@ func parseJWKS(data string) (*jwkSet, error) {
 		return nil, err
 	}
 	set := &jwkSet{byKid: make(map[string][]*jwk)}
-	var skipped []error
+	var reasons []error
+	skipped := 0
 	err = jsonfast.IterateArray(keys, func(elem string) error {
 		k, unusable := parseJWK(elem)
 		if unusable != nil {
-			skipped = append(skipped, unusable)
+			skipped++
+			if len(reasons) < maxSkippedReasons {
+				reasons = append(reasons, unusable)
+			}
 			return nil
 		}
 		set.keys = append(set.keys, k)
@@ -129,9 +139,19 @@ func parseJWKS(data string) (*jwkSet, error) {
 		return nil, errKeysNotArray
 	}
 	if len(set.keys) == 0 {
-		return nil, errors.Join(append([]error{errNoUsableKey}, skipped...)...)
+		return nil, noUsableKey(reasons, skipped)
 	}
 	return set, nil
+}
+
+// noUsableKey refuses a JWKS of unusable keys: errNoUsableKey, which counts them
+// when reasons holds only the first ones, joined with reasons.
+func noUsableKey(reasons []error, unusable int) error {
+	head := errNoUsableKey
+	if unusable > len(reasons) {
+		head = fmt.Errorf("%w: %d unusable keys", errNoUsableKey, unusable)
+	}
+	return errors.Join(append([]error{head}, reasons...)...)
 }
 
 // jwkMembers holds the decoded string members of one JWK that verification

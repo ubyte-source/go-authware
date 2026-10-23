@@ -161,6 +161,7 @@ services. It defends against:
 |---|---|
 | JWT length | 16 KiB |
 | JWKS body | 1 MiB |
+| Reasons a refused JWKS keeps for its unusable keys | those of the first 3, and the count of all |
 | Discovery document | 256 KiB |
 | JSON nesting | 32 levels |
 | Facade `/register` and `/token` request bodies | 64 KiB |

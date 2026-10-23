@@ -334,6 +334,60 @@ func TestParseJWKSInvalid(t *testing.T) {
 	}
 }
 
+// skippedReasons is the documented number of reasons for unusable keys that the
+// refusal of a JWKS without a usable key keeps, and fewKeys the unusable keys of the
+// smaller set of TestParseJWKSRefusalIsBounded.
+const (
+	skippedReasons = 3
+	fewKeys        = 1000
+)
+
+// TestParseJWKSKeepsTheFirstReasons refuses sets of unusable keys: the refusal
+// joins the reasons of the first skippedReasons, and counts the keys past them.
+func TestParseJWKSKeepsTheFirstReasons(t *testing.T) {
+	const kept = "\nunusable JWK: kty \"k0\"\nunusable JWK: kty \"k1\"\nunusable JWK: kty \"k2\""
+	for keys, want := range map[int]string{
+		skippedReasons:     "invalid JWKS: no usable key" + kept,
+		skippedReasons + 1: "invalid JWKS: no usable key: 4 unusable keys" + kept,
+	} {
+		members := make([]map[string]any, keys)
+		for i := range members {
+			members[i] = map[string]any{testMemberKty: "k" + strconv.Itoa(i)}
+		}
+		set, err := parseJWKS(string(jwksDocument(t, members...)))
+		if set != nil || !errors.Is(err, errNoUsableKey) || !errors.Is(err, errUnusableKey) || err.Error() != want {
+			t.Errorf("parseJWKS(%d unusable keys) = %+v, %q; want nil, %q", keys, set, err, want)
+		}
+	}
+}
+
+// TestParseJWKSRefusalIsBounded refuses sets of fewKeys and costScale times as many
+// unusable keys with skippedReasons reasons and their count, the same text but the
+// number, at a cost linear in the set.
+func TestParseJWKSRefusalIsBounded(t *testing.T) {
+	document := func(keys int) string { return `{"keys":[{}` + strings.Repeat(`,{}`, keys-1) + `]}` }
+	small, large := document(fewKeys), document(costScale*fewKeys)
+	for doc, keys := range map[string]int{small: fewKeys, large: costScale * fewKeys} {
+		want := "invalid JWKS: no usable key: " + strconv.Itoa(keys) + " unusable keys" +
+			strings.Repeat("\nunusable JWK: kty \"\"", skippedReasons)
+		set, err := parseJWKS(doc)
+		var joined interface{ Unwrap() []error }
+		if set != nil || err == nil || err.Error() != want || !errors.As(err, &joined) ||
+			len(joined.Unwrap()) != skippedReasons+1 {
+			t.Fatalf("parseJWKS(%d unusable keys) = %+v, %.200q; want nil, %.200q joining %d errors", keys, set, err,
+				want, skippedReasons+1)
+		}
+	}
+	run := func(doc string) func() {
+		return func() {
+			if _, err := parseJWKS(doc); !errors.Is(err, errNoUsableKey) {
+				t.Fatalf("parseJWKS(unusable keys) = %.80v, want errNoUsableKey", err)
+			}
+		}
+	}
+	assertLinearCost(t, run(small), run(large))
+}
+
 // overlongExponent is the size in bytes of the shorter exponent of
 // TestParseJWKSCostIsLinear, far past the 31 bits an exponent may hold.
 const overlongExponent = 4 << 10
