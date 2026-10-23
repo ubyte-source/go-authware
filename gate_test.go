@@ -673,7 +673,7 @@ func TestNewSharesIssuer(t *testing.T) {
 	if id, err := g.Authenticate(r); err != nil || id.Subject() != testUser {
 		t.Fatalf("Authenticate = %v, %v, want %s", id, err, testUser)
 	}
-	if _, err := g.authServer.endpoints(t.Context(), time.Now()); err != nil {
+	if _, err := g.authServer.endpoints(t.Context()); err != nil {
 		t.Fatalf("endpoints = %v, want the discovered endpoints", err)
 	}
 	if n := idp.discoveries.Load(); n != 1 {

@@ -611,7 +611,7 @@ func TestFacadePost(t *testing.T) {
 		cfg := facadeConfig(newFakeIDP(t))
 		onTokenPost(cfg, answerWith(tc.status, tc.body))
 		f := testFacade(t, cfg)
-		up, err := f.endpoints(t.Context(), time.Now())
+		up, err := f.endpoints(t.Context())
 		if err != nil {
 			t.Fatalf("endpoints = %v, want the upstream endpoints", err)
 		}
@@ -625,7 +625,7 @@ func TestFacadePost(t *testing.T) {
 	cfg := facadeConfig(newFakeIDP(t))
 	onTokenPost(cfg, func(*http.Request) (*http.Response, error) { return nil, errUpstream })
 	f := testFacade(t, cfg)
-	up, err := f.endpoints(t.Context(), time.Now())
+	up, err := f.endpoints(t.Context())
 	if err != nil {
 		t.Fatalf("endpoints = %v, want the upstream endpoints", err)
 	}

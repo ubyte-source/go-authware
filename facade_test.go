@@ -100,7 +100,7 @@ func TestFacadeEndpointsPassesTheContext(t *testing.T) {
 	logs := &logCapture{}
 	cfg := facadeConfig(idp)
 	cfg.HTTPClient.Transport, cfg.ErrorLog = markCounting(&fetches, cfg.HTTPClient.Transport), slog.New(logs)
-	up, err := testFacade(t, cfg).endpoints(marked(t), time.Now())
+	up, err := testFacade(t, cfg).endpoints(marked(t))
 	got := logs.logged()
 	if !reflect.ValueOf(up).IsZero() || !errors.Is(err, errUpstreamEndpoint) || fetches.Load() != 1 || len(got) != 1 ||
 		!got[0].inMarked {
@@ -157,11 +157,11 @@ func TestEndpointErrorWrite(t *testing.T) {
 func TestFacadeEndpoints(t *testing.T) {
 	idp := newFakeIDP(t)
 	f := testFacade(t, facadeConfig(idp))
-	first, err := f.endpoints(t.Context(), time.Now())
+	first, err := f.endpoints(t.Context())
 	if err != nil {
 		t.Fatalf("endpoints error = %v, want nil", err)
 	}
-	again, err := f.endpoints(t.Context(), time.Now())
+	again, err := f.endpoints(t.Context())
 	if err != nil || again.authorizeURL != first.authorizeURL || again.tokenURL != first.tokenURL ||
 		idp.discoveries.Load() != 1 {
 		t.Fatalf("second endpoints = %+v, %v after %d discoveries; want the first endpoints %+v after 1",
@@ -175,25 +175,27 @@ func TestFacadeEndpoints(t *testing.T) {
 }
 
 func TestFacadeEndpointsBacksOffAfterFailure(t *testing.T) {
-	idp := newFakeIDP(t)
-	doc := idp.doc
-	idp.doc = func() (int, string) { return http.StatusServiceUnavailable, "" }
-	f := testFacade(t, facadeConfig(idp))
-	now := time.Now()
-	if up, err := f.endpoints(t.Context(), now); !reflect.ValueOf(up).IsZero() ||
-		!errorMatches(err, statusError(http.StatusServiceUnavailable)) {
-		t.Fatalf("endpoints on a failed discovery = %+v, %v, want the zero upstream, a 503 answer", up, err)
-	}
-	idp.doc = doc
-	later := now.Add(fetchPause)
-	if up, err := f.endpoints(t.Context(), later.Add(-time.Nanosecond)); !reflect.ValueOf(up).IsZero() ||
-		!errors.Is(err, errRetryBackoff) || idp.discoveries.Load() != 1 {
-		t.Fatalf("endpoints during backoff = %+v, %v after %d discoveries, want the zero upstream, errRetryBackoff "+
-			"after 1", up, err, idp.discoveries.Load())
-	}
-	if _, err := f.endpoints(t.Context(), later); err != nil || idp.discoveries.Load() != 2 {
-		t.Fatalf("endpoints after backoff = %v after %d discoveries, want nil after 2", err, idp.discoveries.Load())
-	}
+	synctest.Test(t, func(t *testing.T) {
+		idp := newFakeIDP(t)
+		doc := idp.doc
+		idp.doc = func() (int, string) { return http.StatusServiceUnavailable, "" }
+		f := testFacade(t, facadeConfig(idp))
+		if up, err := f.endpoints(t.Context()); !reflect.ValueOf(up).IsZero() ||
+			!errorMatches(err, statusError(http.StatusServiceUnavailable)) {
+			t.Fatalf("endpoints on a failed discovery = %+v, %v, want the zero upstream, a 503 answer", up, err)
+		}
+		idp.doc = doc
+		time.Sleep(fetchPause - time.Nanosecond)
+		if up, err := f.endpoints(t.Context()); !reflect.ValueOf(up).IsZero() ||
+			!errors.Is(err, errRetryBackoff) || idp.discoveries.Load() != 1 {
+			t.Fatalf("endpoints during backoff = %+v, %v after %d discoveries, want the zero upstream, "+
+				"errRetryBackoff after 1", up, err, idp.discoveries.Load())
+		}
+		time.Sleep(time.Nanosecond)
+		if _, err := f.endpoints(t.Context()); err != nil || idp.discoveries.Load() != 2 {
+			t.Fatalf("endpoints after backoff = %v after %d discoveries, want nil after 2", err, idp.discoveries.Load())
+		}
+	})
 }
 
 func TestFacadeEndpointsRejectsUnusableMetadata(t *testing.T) {
@@ -204,7 +206,7 @@ func TestFacadeEndpointsRejectsUnusableMetadata(t *testing.T) {
 	cfg.ErrorLog = slog.New(&logs)
 	f := testFacade(t, cfg)
 	for range 2 {
-		if up, err := f.endpoints(t.Context(), time.Now()); !reflect.ValueOf(up).IsZero() ||
+		if up, err := f.endpoints(t.Context()); !reflect.ValueOf(up).IsZero() ||
 			!errors.Is(err, errUpstreamEndpoint) {
 			t.Fatalf("endpoints without token endpoint = %+v, %v, want the zero upstream, errUpstreamEndpoint", up, err)
 		}
@@ -221,58 +223,62 @@ func TestFacadeEndpointsRejectsUnusableMetadata(t *testing.T) {
 // metadata again, as to a caller that held it across the refresh: each metadata
 // keeps the endpoints recorded with it, warned once.
 func TestFacadeEndpointsRecordsEachMetadataOnce(t *testing.T) {
-	idp := newFakeIDP(t)
-	idp.doc = unusableDoc
-	var logs logCapture
-	cfg := facadeConfig(idp)
-	cfg.ErrorLog = slog.New(&logs)
-	f := testFacade(t, cfg)
-	now := time.Now()
-	later := now.Add(wantKeysTTL)
-	_, first := f.endpoints(t.Context(), now)
-	held := f.idp.metadata.snap.Load().value
-	_, second := f.endpoints(t.Context(), later)
-	f.idp.metadata.snap.Store(&snapshot[*serverMetadata]{fetched: later, value: held})
-	up, err := f.endpoints(t.Context(), later)
-	got := logs.logged()
-	warning := func(rec logRecord, cause error) bool {
-		return rec.level == slog.LevelWarn && rec.msg == "authware: upstream endpoints unusable" &&
-			errors.Is(rec.err, cause)
-	}
-	if !reflect.ValueOf(up).IsZero() || !errors.Is(first, errUpstreamEndpoint) || !errors.Is(err, first) ||
-		idp.discoveries.Load() != 2 || len(got) != 2 || !warning(got[0], first) || !warning(got[1], second) {
-		t.Fatalf("endpoints of the first metadata again = %+v, %v after %v and %v, %d discoveries, logged %+v; "+
-			"want the zero upstream and the first errUpstreamEndpoint after 2, one warning each", up, err, first,
-			second, idp.discoveries.Load(), got)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		idp := newFakeIDP(t)
+		idp.doc = unusableDoc
+		var logs logCapture
+		cfg := facadeConfig(idp)
+		cfg.ErrorLog = slog.New(&logs)
+		f := testFacade(t, cfg)
+		_, first := f.endpoints(t.Context())
+		held := f.idp.metadata.snap.Load().value
+		time.Sleep(wantKeysTTL)
+		_, second := f.endpoints(t.Context())
+		f.idp.metadata.snap.Store(&snapshot[*serverMetadata]{fetched: time.Now(), value: held})
+		up, err := f.endpoints(t.Context())
+		got := logs.logged()
+		warning := func(rec logRecord, cause error) bool {
+			return rec.level == slog.LevelWarn && rec.msg == "authware: upstream endpoints unusable" &&
+				errors.Is(rec.err, cause)
+		}
+		if !reflect.ValueOf(up).IsZero() || !errors.Is(first, errUpstreamEndpoint) || !errors.Is(err, first) ||
+			idp.discoveries.Load() != 2 || len(got) != 2 || !warning(got[0], first) || !warning(got[1], second) {
+			t.Fatalf("endpoints of the first metadata again = %+v, %v after %v and %v, %d discoveries, logged %+v; "+
+				"want the zero upstream and the first errUpstreamEndpoint after 2, one warning each", up, err, first,
+				second, idp.discoveries.Load(), got)
+		}
+	})
 }
 
 // TestFacadeEndpointsFollowIssuer moves the token endpoint upstream: the
 // facade keeps the cached one within the TTL and relays to the new one after.
 func TestFacadeEndpointsFollowIssuer(t *testing.T) {
-	idp := newFakeIDP(t)
-	f := testFacade(t, facadeConfig(idp))
-	now := time.Now()
-	if _, err := f.endpoints(t.Context(), now); err != nil {
-		t.Fatalf("endpoints = %v, want nil", err)
-	}
-	moved := testIDPToken + "2"
-	idp.doc = func() (int, string) {
-		return http.StatusOK, `{"issuer":"` + testIDPIssuer + `","authorization_endpoint":"` + testIDPAuthorize +
-			`","token_endpoint":"` + moved + `"}`
-	}
-	for _, step := range []struct {
-		at   time.Duration
-		want string
-	}{
-		{wantKeysTTL - time.Nanosecond, testIDPToken},
-		{wantKeysTTL, moved},
-	} {
-		up, err := f.endpoints(t.Context(), now.Add(step.at))
-		if err != nil || up.tokenURL.String() != step.want {
-			t.Fatalf("endpoints(+%v) = %v, %v, want %s", step.at, up.tokenURL, err, step.want)
+	synctest.Test(t, func(t *testing.T) {
+		idp := newFakeIDP(t)
+		f := testFacade(t, facadeConfig(idp))
+		start := time.Now()
+		if _, err := f.endpoints(t.Context()); err != nil {
+			t.Fatalf("endpoints = %v, want nil", err)
 		}
-	}
+		moved := testIDPToken + "2"
+		idp.doc = func() (int, string) {
+			return http.StatusOK, `{"issuer":"` + testIDPIssuer + `","authorization_endpoint":"` + testIDPAuthorize +
+				`","token_endpoint":"` + moved + `"}`
+		}
+		for _, step := range []struct {
+			at   time.Duration
+			want string
+		}{
+			{wantKeysTTL - time.Nanosecond, testIDPToken},
+			{wantKeysTTL, moved},
+		} {
+			time.Sleep(time.Until(start.Add(step.at)))
+			up, err := f.endpoints(t.Context())
+			if err != nil || up.tokenURL.String() != step.want {
+				t.Fatalf("endpoints(+%v) = %v, %v, want %s", step.at, up.tokenURL, err, step.want)
+			}
+		}
+	})
 }
 
 func TestFacadeEndpointsSharesDiscovery(t *testing.T) {
@@ -288,7 +294,7 @@ func TestFacadeEndpointsSharesDiscovery(t *testing.T) {
 		errs := make(chan error, callers)
 		for range callers {
 			wg.Go(func() {
-				_, err := f.endpoints(t.Context(), time.Now())
+				_, err := f.endpoints(t.Context())
 				errs <- err
 			})
 		}
@@ -320,7 +326,7 @@ func TestFacadeEndpointsWarnsOnce(t *testing.T) {
 		var wg sync.WaitGroup
 		for range callers {
 			wg.Go(func() {
-				if up, err := f.endpoints(t.Context(), time.Now()); !reflect.ValueOf(up).IsZero() ||
+				if up, err := f.endpoints(t.Context()); !reflect.ValueOf(up).IsZero() ||
 					!errors.Is(err, errUpstreamEndpoint) {
 					t.Errorf("endpoints = %+v, %v, want the zero upstream, errUpstreamEndpoint", up, err)
 				}
@@ -369,7 +375,7 @@ func TestFacadeEndpointsTimesOut(t *testing.T) {
 		cfg.HTTPClient = &http.Client{Transport: roundTripFunc(stall)}
 		f := testFacade(t, cfg)
 		start := time.Now()
-		up, err := f.endpoints(t.Context(), start)
+		up, err := f.endpoints(t.Context())
 		if elapsed := time.Since(start); !reflect.ValueOf(up).IsZero() || !errors.Is(err, context.DeadlineExceeded) ||
 			elapsed != wantFetchTimeout {
 			t.Fatalf("endpoints = %+v, %v after %v, want the zero upstream, context.DeadlineExceeded after %v", up, err,
@@ -381,13 +387,12 @@ func TestFacadeEndpointsTimesOut(t *testing.T) {
 func BenchmarkFacadeEndpoints(b *testing.B) {
 	idp := newFakeIDP(b)
 	f := testFacade(b, facadeConfig(idp))
-	now := time.Now()
-	if up, err := f.endpoints(b.Context(), now); err != nil || up.authorizeURL != testIDPAuthorize {
+	if up, err := f.endpoints(b.Context()); err != nil || up.authorizeURL != testIDPAuthorize {
 		b.Fatalf("endpoints = %s, %v, want %s", up.authorizeURL, err, testIDPAuthorize)
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := f.endpoints(b.Context(), now); err != nil {
+		if _, err := f.endpoints(b.Context()); err != nil {
 			b.Fatalf("endpoints = %v, want nil", err)
 		}
 	}

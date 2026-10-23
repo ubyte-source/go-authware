@@ -202,18 +202,18 @@ func (f *facade) relayTarget(ctx context.Context, vals url.Values, rewrite func(
 	if !ok {
 		return nil, upstream{}, badRequest(codeInvalidScope, "scope names another resource")
 	}
-	up, err := f.endpoints(ctx, time.Now())
+	up, err := f.endpoints(ctx)
 	if err != nil {
 		return nil, upstream{}, unavailable()
 	}
 	return params, up, nil
 }
 
-// endpoints returns the upstream endpoints the issuer metadata names at now,
+// endpoints returns the upstream endpoints the issuer metadata names now,
 // recorded with that metadata; of the callers that derive them from it, only the
 // one that records them logs them when unusable.
-func (f *facade) endpoints(ctx context.Context, now time.Time) (upstream, error) {
-	md, err := f.idp.metadata.get(ctx, now)
+func (f *facade) endpoints(ctx context.Context) (upstream, error) {
+	md, err := f.idp.metadata.get(ctx, time.Now())
 	if err != nil {
 		return upstream{}, err
 	}
