@@ -94,6 +94,21 @@ func TestSignerSignHeaderSlices(t *testing.T) {
 	}
 }
 
+// TestSignerSignRefusesAHostNetHTTPAlters pins that Sign refuses, before it sets a
+// header, a host net/http would send as punycode or as an empty Host.
+func TestSignerSignRefusesAHostNetHTTPAlters(t *testing.T) {
+	t.Parallel()
+	s := newTestSigner(t)
+	for _, host := range []string{"b\u00fccher.example", "a b.example"} {
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com/p", http.NoBody)
+		r.Host = host
+		if err := s.Sign(t.Context(), r); !errors.Is(err, ErrInvalidHost) || !errors.Is(err, ErrRejected) ||
+			len(r.Header) != 0 {
+			t.Errorf("Sign(host %q) = %v, header %v; want ErrInvalidHost and no header", host, err, r.Header)
+		}
+	}
+}
+
 // TestSignerSignZoneHost signs requests to IPv6 literal hosts with and without a
 // zone, a zone holding a "%" included, sends them through net/http's wire form
 // and verifies what a server reads.

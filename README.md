@@ -649,6 +649,9 @@ client := &http.Client{Transport: cred.NewTransport(nil, signer)}
 - `NewSigner`, `NewVerifier` and `NewMemoryStore` refuse a short key, a
   window out of range, a nil store or a capacity below 1 with an error
   wrapping `ErrInvalidConfig`.
+- `Signer.Sign` refuses, before it changes the request, a host net/http would
+  not send as it is, with a byte outside ASCII or another its Host header
+  check refuses, with `ErrInvalidHost`, as no signature over it could verify.
 - `Verify` requires each header exactly once in canonical form, checks the
   timestamp window, accepts a body of at most 1 MiB (and restores it),
   compares the MAC in constant time and only then records the nonce,

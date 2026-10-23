@@ -53,6 +53,10 @@ var (
 	// ErrInvalidBody reports a body, signed or verified, that fails to read or
 	// close, or exceeds 1 MiB.
 	ErrInvalidBody = fmt.Errorf("%w: invalid body", ErrRejected)
+	// ErrInvalidHost reports a request host that net/http would not send as it is,
+	// one with a byte outside ASCII or another its Host header check refuses, so no
+	// signature over it could verify.
+	ErrInvalidHost = fmt.Errorf("%w: invalid host", ErrRejected)
 	// ErrInvalidSignature reports a signature that does not match the request.
 	ErrInvalidSignature = fmt.Errorf("%w: invalid signature", ErrRejected)
 	// ErrNonceReplayed reports a nonce the store has already recorded.

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -298,4 +299,24 @@ func FuzzCheck(f *testing.F) {
 			t.Fatalf("Check(%q) = %v, %v; want %q", raw, got, err, text)
 		}
 	})
+}
+
+// hostLetter is the byte TestSentAsIs puts around each byte it tries in a host.
+const hostLetter = "a"
+
+// TestSentAsIs compares SentAsIs with what net/http sends for a host holding each
+// byte, and for hosts outside ASCII, which it converts to punycode or refuses.
+func TestSentAsIs(t *testing.T) {
+	check := func(host string) {
+		sent, ok := wireHost(host)
+		if got, want := SentAsIs(host), ok && sent == host; got != want {
+			t.Errorf("SentAsIs(%q) = %t, want %t: net/http sends it as %q, written %t", host, got, want, sent, ok)
+		}
+	}
+	for _, host := range []string{"", "b\u00fccher.example", "\u00e9", "x\xff", "[::1]:8443", "a%zz"} {
+		check(host)
+	}
+	for c := range math.MaxUint8 + 1 {
+		check(hostLetter + string([]byte{byte(c)}) + hostLetter)
+	}
 }

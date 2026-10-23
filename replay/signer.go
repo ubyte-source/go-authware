@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -31,10 +32,14 @@ func NewSigner(key secret.Value) (*Signer, error) {
 	return &Signer{mac: mac, bodies: new(netguard.Digester)}, nil
 }
 
-// Sign sets the timestamp, a nonce from crypto/rand and the signature headers on
-// r, after it hashes the body as the package comment states; a body that fails to
-// read or close, or exceeds 1 MiB, fails with [ErrInvalidBody].
+// Sign refuses with [ErrInvalidHost] a host net/http would not send as it is, then
+// sets a timestamp, a crypto/rand nonce and the signature headers on r once it hashes
+// the body as the package comment states, failing with [ErrInvalidBody] on a bad one.
 func (s *Signer) Sign(_ context.Context, r *http.Request) error {
+	if head, tail := netguard.SplitZone(cmp.Or(r.Host, r.URL.Host)); !netguard.SentAsIs(head) ||
+		!netguard.SentAsIs(tail) {
+		return ErrInvalidHost
+	}
 	var body *[sha256.Size]byte
 	if hasBody(r) {
 		sum, err := s.bodies.Digest(r, maxBodyBytes, errBodyOverLimit)

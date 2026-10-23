@@ -144,7 +144,7 @@ func (s *sigV4) Sign(_ context.Context, r *http.Request) error {
 	switch {
 	case host == "":
 		return ErrMissingHost
-	case !sentAsIs(host):
+	case !netguard.SentAsIs(host):
 		return ErrInvalidHost
 	}
 	r.Host = host
@@ -358,22 +358,6 @@ func signingHost(r *http.Request) string {
 		return "[" + h + "]"
 	}
 	return h
-}
-
-// hostPunctuation holds the bytes beside the unreserved ones that the Host header check
-// of net/http admits.
-const hostPunctuation = "!$%&'()*+,:;=[]"
-
-// sentAsIs reports whether net/http sends host, which holds no zone, as it is: whether
-// its Host header check admits every byte, an unreserved one or one of hostPunctuation,
-// which leaves out every byte outside ASCII.
-func sentAsIs(host string) bool {
-	for i := range len(host) {
-		if c := host[i]; !syntax.IsUnreserved(c) && strings.IndexByte(hostPunctuation, c) < 0 {
-			return false
-		}
-	}
-	return true
 }
 
 type queryPair struct{ encName, encValue []byte }

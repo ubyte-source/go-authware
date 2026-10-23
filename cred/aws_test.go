@@ -13,7 +13,6 @@ import (
 	"io"
 	"log"
 	"maps"
-	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -726,23 +725,6 @@ func sentHost(r *http.Request) (string, bool) {
 func wireHost(host string) (string, bool) {
 	return sentHost(&http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "http", Host: host, Path: slash},
 		Host: host})
-}
-
-// TestSentAsIs compares sentAsIs with what net/http sends for a host holding each
-// byte, and for hosts outside ASCII, which it converts to punycode or refuses.
-func TestSentAsIs(t *testing.T) {
-	check := func(host string) {
-		sent, ok := wireHost(host)
-		if got, want := sentAsIs(host), ok && sent == host; got != want {
-			t.Errorf("sentAsIs(%q) = %t, want %t: net/http sends it as %q, written %t", host, got, want, sent, ok)
-		}
-	}
-	for _, host := range []string{"", "b\u00fccher.example", "\u00e9", "x\xff", "[::1]:8443", "a%zz"} {
-		check(host)
-	}
-	for c := range math.MaxUint8 + 1 {
-		check(testLetter + string([]byte{byte(c)}) + testLetter)
-	}
 }
 
 // checkSignedHost signs a GET of host over scheme, whose default port is port, and,

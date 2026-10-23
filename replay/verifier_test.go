@@ -21,6 +21,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ubyte-source/go-authware/v2/internal/netguard"
 	"github.com/ubyte-source/go-authware/v2/secret"
 )
 
@@ -900,27 +901,21 @@ const (
 // refuses, so that Verify meets that body behind a valid envelope.
 const overLimitNonce = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
 
+// signable reports whether Sign accepts host: a host it refuses never reaches a
+// verifier, so FuzzVerifierVerify signs only the others.
+func signable(host string) bool {
+	head, tail := netguard.SplitZone(host)
+	return netguard.SentAsIs(head) && netguard.SentAsIs(tail)
+}
+
 func FuzzVerifierVerify(f *testing.F) {
-	f.Add(http.MethodGet, "api.example", "/v1/items", "a=1", []byte(nil),
-		int32(0), uint8(0), uint16(0), byte(0), "")
-	f.Add(http.MethodPost, "API.example:8443", "/a b", "x=%2F", []byte(`{"a":1}`),
-		int32(-windowSeconds), uint8(0), uint16(0), byte(0), "")
-	f.Add(http.MethodPut, "h", "/p", "", []byte("body"),
-		int32(windowSeconds+1), uint8(0), uint16(0), byte(0), "")
-	f.Add(http.MethodPut, "h", "/p", "", bytes.Repeat([]byte("b"), mib+1),
-		int32(0), uint8(0), uint16(0), byte(0), "")
-	for field := range uint8(requestMutations) {
-		f.Add(http.MethodGet, "api.example", "/p", "q", []byte("b"), int32(seedSkew), field, uint16(seedPos),
-			byte(caseBit), "+1700000007")
-	}
-	for _, raw := range []string{
-		"01700000000", "-1", "9223372036854775808", strings.Repeat("A", 2*nonceSize), strings.Repeat("0", sigHexDigits),
-	} {
-		f.Add("", "", "", "", []byte(nil), int32(0), uint8(setEnvelope), uint16(0), byte(0), raw)
-	}
+	addVerifierSeeds(f)
 	f.Fuzz(func(t *testing.T, method, host, path, query string, body []byte, skew int32,
 		field uint8, pos uint16, flip byte, raw string,
 	) {
+		if !signable(host) {
+			return
+		}
 		synctest.Test(t, func(t *testing.T) {
 			r := &http.Request{
 				Method: method, Host: host, URL: &url.URL{Path: path, RawQuery: query},
@@ -944,6 +939,29 @@ func FuzzVerifierVerify(f *testing.F) {
 			}
 		})
 	})
+}
+
+// addVerifierSeeds adds the seeds of FuzzVerifierVerify: valid and skewed requests,
+// a body over the limit, one of each mutation and the edge envelope values.
+func addVerifierSeeds(f *testing.F) {
+	f.Helper()
+	f.Add(http.MethodGet, "api.example", "/v1/items", "a=1", []byte(nil),
+		int32(0), uint8(0), uint16(0), byte(0), "")
+	f.Add(http.MethodPost, "API.example:8443", "/a b", "x=%2F", []byte(`{"a":1}`),
+		int32(-windowSeconds), uint8(0), uint16(0), byte(0), "")
+	f.Add(http.MethodPut, "h", "/p", "", []byte("body"),
+		int32(windowSeconds+1), uint8(0), uint16(0), byte(0), "")
+	f.Add(http.MethodPut, "h", "/p", "", bytes.Repeat([]byte("b"), mib+1),
+		int32(0), uint8(0), uint16(0), byte(0), "")
+	for field := range uint8(requestMutations) {
+		f.Add(http.MethodGet, "api.example", "/p", "q", []byte("b"), int32(seedSkew), field, uint16(seedPos),
+			byte(caseBit), "+1700000007")
+	}
+	for _, raw := range []string{
+		"01700000000", "-1", "9223372036854775808", strings.Repeat("A", 2*nonceSize), strings.Repeat("0", sigHexDigits),
+	} {
+		f.Add("", "", "", "", []byte(nil), int32(0), uint8(setEnvelope), uint16(0), byte(0), raw)
+	}
 }
 
 func BenchmarkVerifierVerify(b *testing.B) {
