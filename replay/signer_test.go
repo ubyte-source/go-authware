@@ -99,7 +99,7 @@ func TestSignerSignHeaderSlices(t *testing.T) {
 func TestSignerSignRefusesAHostNetHTTPAlters(t *testing.T) {
 	t.Parallel()
 	s := newTestSigner(t)
-	for _, host := range []string{"b\u00fccher.example", "a b.example"} {
+	for _, host := range []string{"b\u00fccher.example", "a b.example", "[fe80::1%a b]", "[fe80::1%\u00e9]:80"} {
 		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com/p", http.NoBody)
 		r.Host = host
 		if err := s.Sign(t.Context(), r); !errors.Is(err, ErrInvalidHost) || !errors.Is(err, ErrRejected) ||

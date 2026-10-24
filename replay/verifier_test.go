@@ -21,7 +21,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ubyte-source/go-authware/v2/internal/netguard"
 	"github.com/ubyte-source/go-authware/v2/secret"
 )
 
@@ -901,11 +900,29 @@ const (
 // refuses, so that Verify meets that body behind a valid envelope.
 const overLimitNonce = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
 
-// signable reports whether Sign accepts host: a host it refuses never reaches a
-// verifier, so FuzzVerifierVerify signs only the others.
-func signable(host string) bool {
-	head, tail := netguard.SplitZone(host)
-	return netguard.SentAsIs(head) && netguard.SentAsIs(tail)
+// sentAsSigned reports whether host is empty, which net/http never writes, or a server
+// reads it, written by net/http, as a host equal to it once referenceHost maps both.
+func sentAsSigned(host string) bool {
+	if host == "" {
+		return true
+	}
+	sent, ok := wireHost(host)
+	return ok && sent != "" && referenceHost(sent) == referenceHost(host)
+}
+
+// signsHost reports whether host reaches a verifier: Sign must refuse with
+// ErrInvalidHost, setting no header, each host that sentAsSigned refuses.
+func signsHost(t *testing.T, host string) bool {
+	t.Helper()
+	if sentAsSigned(host) {
+		return true
+	}
+	r := &http.Request{Method: http.MethodGet, Host: host, URL: &url.URL{Path: "/"}}
+	if err := newTestSigner(t).Sign(t.Context(), r); !errors.Is(err, ErrInvalidHost) || r.Header != nil {
+		t.Fatalf("Sign(host %q) = %v, header %v; want ErrInvalidHost and none: net/http alters it", host, err,
+			r.Header)
+	}
+	return false
 }
 
 func FuzzVerifierVerify(f *testing.F) {
@@ -913,7 +930,7 @@ func FuzzVerifierVerify(f *testing.F) {
 	f.Fuzz(func(t *testing.T, method, host, path, query string, body []byte, skew int32,
 		field uint8, pos uint16, flip byte, raw string,
 	) {
-		if !signable(host) {
+		if !signsHost(t, host) {
 			return
 		}
 		synctest.Test(t, func(t *testing.T) {

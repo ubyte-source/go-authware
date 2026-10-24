@@ -1,8 +1,6 @@
 package replay
 
 import (
-	"bufio"
-	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -145,21 +143,6 @@ func TestMACStateInputDefaults(t *testing.T) {
 	if got, want := string(st.input(r, nil)), "DELETE\nheader.example\n/\n"; !strings.HasPrefix(got, want) {
 		t.Fatalf("input = %q, want it to start with %q", got, want)
 	}
-}
-
-// wireHost returns the Host a server reads from a request net/http writes for
-// host, and false when net/http refuses to write it.
-func wireHost(host string) (string, bool) {
-	r := &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "http", Host: host, Path: "/"}, Host: host}
-	var wire bytes.Buffer
-	if r.Write(&wire) != nil {
-		return "", false
-	}
-	got, err := http.ReadRequest(bufio.NewReader(&wire))
-	if err != nil {
-		return "", false
-	}
-	return got.Host, true
 }
 
 // settledHost returns the host net/http sends for host once it sends one as it

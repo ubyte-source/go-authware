@@ -36,8 +36,7 @@ func NewSigner(key secret.Value) (*Signer, error) {
 // sets a timestamp, a crypto/rand nonce and the signature headers on r once it hashes
 // the body as the package comment states, failing with [ErrInvalidBody] on a bad one.
 func (s *Signer) Sign(_ context.Context, r *http.Request) error {
-	if head, tail := netguard.SplitZone(cmp.Or(r.Host, r.URL.Host)); !netguard.SentAsIs(head) ||
-		!netguard.SentAsIs(tail) {
+	if !netguard.SentAsIs(cmp.Or(r.Host, r.URL.Host)) {
 		return ErrInvalidHost
 	}
 	var body *[sha256.Size]byte

@@ -92,9 +92,9 @@ func SplitZone(host string) (head, tail string) {
 // of net/http admits.
 const hostPunctuation = "!$%&'()*+,:;=[]"
 
-// SentAsIs reports whether net/http sends host, which holds no zone, as it is: whether
-// its Host header check admits every byte, an unreserved one or one of hostPunctuation,
-// which leaves out every byte outside ASCII.
+// SentAsIs reports whether the Host header check of net/http admits every byte of host,
+// an unreserved one or one of hostPunctuation, so that net/http sends host as it is but
+// for an IPv6 zone; every byte outside ASCII fails it.
 func SentAsIs(host string) bool {
 	for i := range len(host) {
 		if c := host[i]; !syntax.IsUnreserved(c) && strings.IndexByte(hostPunctuation, c) < 0 {
