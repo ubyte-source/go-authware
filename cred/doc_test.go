@@ -632,21 +632,16 @@ func (m *markedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		Body: io.NopCloser(strings.NewReader(okToken))}, nil
 }
 
-// markHandler is a slog.Handler that counts the records logged under a marked
-// context.
+// markHandler is a slog.Handler that enables only a marked context and counts
+// the records it handles.
 type markHandler struct {
 	marked *atomic.Int32
 }
 
-func (markHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (markHandler) Enabled(ctx context.Context, _ slog.Level) bool { return isMarked(ctx) }
 
-// Handle counts a record logged under a marked context.
-//
-//nolint:gocritic // hugeParam: slog.Handler requires the Record by value.
-func (h markHandler) Handle(ctx context.Context, _ slog.Record) error {
-	if isMarked(ctx) {
-		h.marked.Add(1)
-	}
+func (h markHandler) Handle(context.Context, slog.Record) error {
+	h.marked.Add(1)
 	return nil
 }
 

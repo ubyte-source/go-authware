@@ -11,7 +11,6 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -199,43 +198,22 @@ func TestNewRedactorLocations(t *testing.T) {
 	}
 }
 
-// recordCapture is a slog.Handler that keeps the last record it handles.
-type recordCapture struct {
-	record slog.Record
-	mu     sync.Mutex
-}
-
-func (*recordCapture) Enabled(context.Context, slog.Level) bool { return true }
-
-// Handle keeps r.
-//
-//nolint:gocritic // hugeParam: slog.Handler requires the Record by value.
-func (c *recordCapture) Handle(_ context.Context, r slog.Record) error {
-	c.mu.Lock()
-	c.record = r
-	c.mu.Unlock()
-	return nil
-}
-
-func (c *recordCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
-
-func (c *recordCapture) WithGroup(string) slog.Handler { return c }
-
-// TestNewRedactorRecord passes a record through: its time, level, message and
-// program counter reach the inner handler unchanged.
+// TestNewRedactorRecord passes a record through: behind the redactor, a JSON handler
+// writes the time, level, message and source it writes for the record itself.
 func TestNewRedactorRecord(t *testing.T) {
 	var pcs [1]uintptr
 	runtime.Callers(1, pcs[:])
-	at := time.Unix(testUnix, 1).UTC()
-	record := slog.NewRecord(at, slog.LevelError, "boom", pcs[0])
-	var capture recordCapture
-	if err := NewRedactor(&capture).Handle(t.Context(), record); err != nil {
+	record := slog.NewRecord(time.Unix(testUnix, 1).UTC(), slog.LevelError, "boom", pcs[0])
+	opts := &slog.HandlerOptions{AddSource: true}
+	var got, want bytes.Buffer
+	if err := NewRedactor(slog.NewJSONHandler(&got, opts)).Handle(t.Context(), record); err != nil {
 		t.Fatalf("Handle = %v, want nil", err)
 	}
-	got := capture.record
-	if !got.Time.Equal(at) || got.Level != slog.LevelError || got.Message != "boom" || got.PC != pcs[0] {
-		t.Fatalf("record = %v %v %q %x, want %v %v %q %x", got.Time, got.Level, got.Message, got.PC, at,
-			slog.LevelError, "boom", pcs[0])
+	if err := slog.NewJSONHandler(&want, opts).Handle(t.Context(), record); err != nil {
+		t.Fatalf("JSONHandler.Handle = %v, want nil", err)
+	}
+	if got.String() != want.String() {
+		t.Fatalf("record through the redactor = %q, want %q", got.String(), want.String())
 	}
 }
 
