@@ -106,8 +106,6 @@ an entry that names no fuzz target.
 - A test must fail when the behavior it names breaks; check it by breaking
   the code once before you trust it. Every security check has such a test,
   and a negative test asserts the specific sentinel with `errors.Is`.
-  other package selects: of every package, or in library mode of the
-  internal packages only.
 
 ## Commit messages
 

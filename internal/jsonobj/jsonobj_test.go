@@ -191,7 +191,7 @@ func TestIterateCostIsLinear(t *testing.T) {
 		got = deeper.String() + " deep and " + larger.String() + " for " + strconv.Itoa(costScale) +
 			" times the items, against " + base.String()
 	}
-	t.Errorf("Iterate took %s, want at most %d and %d times (PERF-3.1: O(n) at any depth)",
+	t.Errorf("Iterate took %s, want at most %d and %d times (linear at any depth)",
 		got, costMargin, costMargin*costScale)
 }
 

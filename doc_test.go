@@ -172,7 +172,7 @@ func assertLinearCost(t *testing.T, small, large func()) {
 			return
 		}
 	}
-	t.Errorf("%d times the input took %s against %s, want at most %d times as long (PERF-3.1: O(n))",
+	t.Errorf("%d times the input took %s against %s, want at most %d times as long (linear cost)",
 		costScale, scaled, base, costMargin*costScale)
 }
 

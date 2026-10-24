@@ -44,7 +44,6 @@ lint: ## Run golangci-lint with .golangci.yml
 fmt: ## Format the code with the formatters of .golangci.yml
 	$(GOLANGCI_LINT) fmt ./...
 
-
 deadcode: ## Fail on any function deadcode -test finds unreachable
 	@out=$$($(DEADCODE) -test ./...) && [ -z "$$out" ] || { echo "$$out"; exit 1; }
 
@@ -67,9 +66,6 @@ bench-smoke: ## Run every benchmark 100 times
 
 vuln: ## Scan the module and the toolchain with govulncheck
 	$(GOVULNCHECK) ./...
-
-
-
 
 testtime: ## Fail on any test slower than TESTTIME_MAX seconds in a serial race run (outside ci)
 	CGO_ENABLED=1 $(GO) test -race -count=1 -p 1 -parallel 1 -json ./... > testtime.json
