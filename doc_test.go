@@ -830,7 +830,7 @@ func (c *logCapture) Enabled(ctx context.Context, _ slog.Level) bool {
 
 // Handle keeps the level, message and error attribute of r, once hold closes.
 //
-//nolint:gocritic // hugeParam: slog.Handler requires the Record by value.
+//nolint:gocritic // hugeParam: slog.Handler requires the Record by value
 func (c *logCapture) Handle(ctx context.Context, r slog.Record) error {
 	if c.hold != nil {
 		<-c.hold

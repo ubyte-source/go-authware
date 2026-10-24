@@ -247,7 +247,7 @@ func (r *redactor) Enabled(ctx context.Context, level slog.Level) bool {
 
 // Handle passes a copy of record with its attributes redacted.
 //
-//nolint:gocritic // hugeParam: slog.Handler requires the Record by value.
+//nolint:gocritic // hugeParam: slog.Handler requires the Record by value
 func (r *redactor) Handle(ctx context.Context, record slog.Record) error {
 	clone := slog.NewRecord(record.Time, record.Level, record.Message, record.PC)
 	record.Attrs(func(a slog.Attr) bool {

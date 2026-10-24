@@ -10,7 +10,7 @@ import (
 // and so do a failed read and close, joined, with the zero T.
 func Exchange[T any](client *http.Client, req *http.Request, read func(*http.Response) (T, error)) (T, error) {
 	var zero T
-	resp, err := client.Do(req) //nolint:gosec // callers build req from a policy-checked URL
+	resp, err := client.Do(req) //nolint:gosec // G704: callers build req from a policy-checked URL
 	if err != nil {
 		return zero, fmt.Errorf("send request: %w", err)
 	}
