@@ -49,7 +49,7 @@ func (s *Signer) Sign(_ context.Context, r *http.Request) error {
 	}
 	st := s.mac.get()
 	defer s.mac.put(st)
-	rand.Read(st.random[:]) //nolint:revive // crypto/rand.Read never returns an error
+	_, _ = rand.Read(st.random[:])
 	b := st.input(r, body)
 	ts := len(b)
 	b = strconv.AppendInt(b, time.Now().Unix(), decimalBase)
