@@ -713,15 +713,13 @@ func metadataDoc(issuerURL, base string) string {
 }
 
 // Upstream identity provider and facade fixture values.
-//
-//nolint:gosec // G101: fixture values, not credentials.
 const (
 	testIDPHost      = "login.example.test"
-	testIDPIssuer    = "https://login.example.test/tenant/v2.0"
-	testIDPAuthorize = "https://login.example.test/tenant/oauth2/v2.0/authorize"
-	testIDPToken     = "https://login.example.test/tenant/oauth2/v2.0/token"
+	testIDPIssuer    = "https://" + testIDPHost + "/tenant/v2.0"
+	testIDPAuthorize = "https://" + testIDPHost + "/tenant/oauth2/v2.0/authorize"
+	testIDPToken     = "https://" + testIDPHost + "/tenant/oauth2/v2.0/token"
 	testFacadeClient = "5f1c7a2e-8d44-4b3a-9e61-2c0d9a7b4e10"
-	testFacadeSecret = "Q~8s+t&x=y%zz/Ab"
+	testFacadeSecret = "Q~8s+t&x=y%zz/Ab" //nolint:gosec // G101: a fixture value, not a credential
 	testScopePrefix  = "api://memory-app"
 	testScopeMemory  = "memory"
 	testMCPOrigin    = "https://mcp.example.com"
@@ -763,7 +761,7 @@ func newFakeIDP(tb testing.TB) *fakeIDP {
 		tb: tb,
 		doc: func() (int, string) {
 			return http.StatusOK, `{"issuer":"` + testIDPIssuer + `","authorization_endpoint":"` + testIDPAuthorize +
-				`","token_endpoint":"` + testIDPToken + `","jwks_uri":"https://login.example.test/tenant/keys"}`
+				`","token_endpoint":"` + testIDPToken + `","jwks_uri":"https://` + testIDPHost + `/tenant/keys"}`
 		},
 		answer: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", testTypeJSON)
