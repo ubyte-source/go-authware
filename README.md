@@ -671,102 +671,106 @@ client := &http.Client{Transport: cred.NewTransport(nil, signer)}
 
 ## Benchmarks
 
-Medians of six samples of `go test -run '^$' -bench . -benchmem -count=6`
-with Go 1.25.9 on an Intel Xeon Gold 6442Y at a load average below 10.
-Tokens carry `"typ":"JWT"`, and cached tokens expire.
+Medians of six samples of `go test -run '^$' -bench . -benchmem -count=6 ./...`
+with Go 1.27.3 on linux/amd64, an Intel Xeon Gold 6442Y pinned to 11 cores with
+GOMAXPROCS 11 on a shared host. Tokens carry `"typ":"JWT"`, and cached tokens
+expire.
 
 | Package    | Benchmark                                        |   ns/op |  B/op | allocs/op |
 |------------|--------------------------------------------------|--------:|------:|----------:|
-| root       | `StaticAuthenticator` shared token (43 bytes)    |     156 |     0 |         0 |
-| root       | `StaticAuthenticator` shared key (64 bytes)      |     156 |     0 |         0 |
-| root       | `MTLSAuthenticator` common name                  |      52 |    80 |         1 |
-| root       | `MTLSAuthenticator` subject DN                   |     970 |   440 |        15 |
-| root       | `MTLSAuthenticator` SPKI pin                     |     668 |   240 |         8 |
-| root       | `OAuthAuthenticatorValidateToken` RS256          |   33393 |  1635 |        12 |
-| root       | `OAuthAuthenticatorValidateToken` RS384          |   34913 |  1635 |        12 |
-| root       | `OAuthAuthenticatorValidateToken` RS512          |   34476 |  1635 |        12 |
-| root       | `OAuthAuthenticatorValidateToken` PS256          |   34839 |  1587 |        16 |
-| root       | `OAuthAuthenticatorValidateToken` PS384          |   35811 |  1715 |        16 |
-| root       | `OAuthAuthenticatorValidateToken` PS512          |   35333 |  1747 |        16 |
-| root       | `OAuthAuthenticatorValidateToken` ES256          |   77640 |   850 |        13 |
-| root       | `OAuthAuthenticatorValidateToken` ES384          |  591542 |  1082 |        20 |
-| root       | `OAuthAuthenticatorValidateToken` ES512          | 1585967 |  1504 |        20 |
-| root       | `OAuthAuthenticatorValidateToken` EdDSA          |   48078 |   256 |         3 |
-| root       | `OAuthAuthenticatorValidateToken` HS256          |    1993 |   257 |         3 |
-| root       | `OAuthAuthenticatorValidateToken` HS384          |    2541 |   257 |         3 |
-| root       | `OAuthAuthenticatorValidateToken` HS512          |    2549 |   257 |         3 |
-| root       | `GateAuthenticate` static token                  |     139 |     0 |         0 |
-| root       | `GateAuthenticate` OAuth token                   |    2118 |   224 |         3 |
-| root       | `GateAuthenticate` malformed token               |     557 |   120 |         3 |
-| root       | `GateMiddleware` accept                          |    2552 |   593 |         5 |
-| root       | `GateMiddleware` deny                            |    1288 |   408 |         6 |
-| root       | `GateMiddleware` static deny                     |     617 |   240 |         3 |
-| root       | `GateCheckHandler` bearer                        |     274 |    64 |         1 |
-| root       | `GateCheckHandler` OAuth                         |    2512 |   337 |         5 |
-| root       | `GateCheckHandler` bearer deny                   |     649 |   304 |         4 |
-| root       | `GateCheckHandler` OAuth deny                    |    1396 |   472 |         7 |
-| root       | `GateRequire` any scope                          |      27 |     0 |         0 |
+| root       | `StaticAuthenticator` shared token (43 bytes)    |     154 |     0 |         0 |
+| root       | `StaticAuthenticator` shared key (64 bytes)      |     147 |     0 |         0 |
+| root       | `MTLSAuthenticator` common name                  |      40 |    80 |         1 |
+| root       | `MTLSAuthenticator` subject DN                   |     421 |   304 |         9 |
+| root       | `MTLSAuthenticator` SPKI pin                     |     132 |    80 |         1 |
+| root       | `OAuthAuthenticatorValidateToken` RS256          |   31163 |  1633 |        12 |
+| root       | `OAuthAuthenticatorValidateToken` RS384          |   30998 |  1633 |        12 |
+| root       | `OAuthAuthenticatorValidateToken` RS512          |   31418 |  1632 |        12 |
+| root       | `OAuthAuthenticatorValidateToken` PS256          |   32014 |  1584 |        16 |
+| root       | `OAuthAuthenticatorValidateToken` PS384          |   32842 |  1713 |        16 |
+| root       | `OAuthAuthenticatorValidateToken` PS512          |   32844 |  1745 |        16 |
+| root       | `OAuthAuthenticatorValidateToken` ES256          |   75848 |   816 |        12 |
+| root       | `OAuthAuthenticatorValidateToken` ES384          |  582750 |  1080 |        20 |
+| root       | `OAuthAuthenticatorValidateToken` ES512          | 1536340 |  1496 |        20 |
+| root       | `OAuthAuthenticatorValidateToken` EdDSA          |   49394 |   256 |         3 |
+| root       | `OAuthAuthenticatorValidateToken` HS256          |    1730 |   256 |         3 |
+| root       | `OAuthAuthenticatorValidateToken` HS384          |    2226 |   256 |         3 |
+| root       | `OAuthAuthenticatorValidateToken` HS512          |    2148 |   256 |         3 |
+| root       | `GateAuthenticate` static token                  |     141 |     0 |         0 |
+| root       | `GateAuthenticate` OAuth token                   |    1808 |   224 |         3 |
+| root       | `GateAuthenticate` malformed token               |     322 |     0 |         0 |
+| root       | `GateMiddleware` accept                          |    1967 |   592 |         5 |
+| root       | `GateMiddleware` deny                            |     900 |   288 |         3 |
+| root       | `GateMiddleware` static deny                     |     254 |    48 |         1 |
+| root       | `GateCheckHandler` bearer                        |     250 |    64 |         1 |
+| root       | `GateCheckHandler` OAuth                         |    2344 |   336 |         5 |
+| root       | `GateCheckHandler` bearer deny                   |     332 |   112 |         2 |
+| root       | `GateCheckHandler` OAuth deny                    |    1103 |   352 |         4 |
+| root       | `GateRequire` any scope                          |      26 |     0 |         0 |
 | root       | `GateRequire` all scopes                         |      20 |     0 |         0 |
-| root       | `GateRequire` deny                               |      98 |    48 |         1 |
-| root       | `GateRequire` no identity                        |     426 |   224 |         3 |
-| root       | `KeySourceKey` known kid                         |      32 |     0 |         0 |
-| root       | `KeySourceKey` unknown kid                       |      82 |     0 |         0 |
-| root       | `KeySourceKeyParallel` unknown kid               | 4.0–4.1 |     0 |         0 |
-| root       | `KeySourceGet` (parallel)                        | 0.5–1.8 |     0 |         0 |
-| root       | `LookupAlgorithm`                                |      15 |     0 |         0 |
-| root       | `Identity` Subject                               |     1.8 |     0 |         0 |
+| root       | `GateRequire` deny                               |      88 |    48 |         1 |
+| root       | `GateRequire` no identity                        |     388 |   224 |         3 |
+| root       | `KeySourceKey` known kid                         |      44 |     0 |         0 |
+| root       | `KeySourceKey` unknown kid                       |      92 |     0 |         0 |
+| root       | `KeySourceKeyParallel` unknown kid               |      19 |     0 |         0 |
+| root       | `KeySourceGet` (parallel)                        |     3.6 |     0 |         0 |
+| root       | `LookupAlgorithm`                                |      11 |     0 |         0 |
+| root       | `Identity` Subject                               |     1.9 |     0 |         0 |
 | root       | `Identity` Mode                                  |     1.8 |     0 |         0 |
-| root       | `Identity` Scopes (one scope)                    |      29 |    16 |         1 |
-| root       | `Identity` HasScope                              |     2.5 |     0 |         0 |
-| root       | `Identity` PeerCertificate                       |     1.8 |     0 |         0 |
-| root       | `Identity` Claim (20-byte value)                 |     192 |    16 |         1 |
-| root       | `Identity` ClaimString (20-byte value)           |     152 |     0 |         0 |
-| root       | `Identity` ClaimInt64                            |      60 |     0 |         0 |
-| root       | `Identity` ClaimFloat64                          |     145 |     0 |         0 |
-| root       | `Identity` ClaimBool                             |     163 |     0 |         0 |
-| root       | `HasClaim` string                                |     154 |     0 |         0 |
-| root       | `HasClaim` int64                                 |      58 |     0 |         0 |
-| root       | `FacadeEndpoints`                                |      18 |     0 |         0 |
-| root       | `SecurityHeaders`                                |     127 |    48 |         1 |
-| root       | `NewRedactor` (log record)                       |     832 |     0 |         0 |
-| root       | `RedactHeader` (default names)                   |     187 |    32 |         2 |
-| `cred`     | `CachedSourceToken` (hit, expiring token)        |      65 |     0 |         0 |
-| `cred`     | `TokenApply` (1.5 KiB token)                     |     410 |  1808 |         2 |
-| `cred`     | `AsSigner` (cached token)                        |     180 |    16 |         1 |
-| `cred`     | `NewTransport` plain (1.5 KiB token)             |     500 |  1024 |         6 |
-| `cred`     | `NewTransport` renewing (1.5 KiB expiring token) |     572 |  1024 |         6 |
-| `cred`     | `SigV4Sign`                                      |    3126 |   730 |        13 |
-| `cred`     | `SigV4SignBody` (4 KiB s3 PUT, STS)              |    4786 |  1938 |        18 |
-| `cred`     | `WriteLowerName/writeLowerName` (4 names)        |     306 |   128 |         2 |
-| `cred`     | `WriteLowerName/strings.ToLower` (4 names)       |     866 |   144 |         5 |
-| `cred`     | `AppendQueryComponent/appendQueryComponent`      |     258 |     0 |         0 |
-| `cred`     | `AppendQueryComponent/url` (QueryUnescape+QueryEscape) |     601 |   128 |         3 |
-| `cred`     | `HexString/hexString` (SHA-256 sum)              |     140 |    64 |         1 |
-| `cred`     | `HexString/hex.EncodeToString` (SHA-256 sum)     |     142 |   128 |         2 |
-| `cred`     | `JoinLines/joinLines` (IAM canonical request)    |     293 |   256 |         1 |
-| `cred`     | `JoinLines/strings.Join` (IAM canonical request) |     935 |   512 |         2 |
-| `jsonobj`  | `Iterate`                                        |     206 |     0 |         0 |
-| `syntax`   | `AppendSegment`                                  |     181 |     0 |         0 |
-| `keyedmac` | `MACSum` (43-byte message)                       |     183 |     0 |         0 |
-| `replay`   | `SignerSign` no body                             |    1201 |   160 |         2 |
-| `replay`   | `SignerSign` 4 KiB body                          |    3996 |   209 |         4 |
-| `replay`   | `SignerSignParallel`                             |     184 |   168 |         2 |
-| `replay`   | `VerifierVerify` no body                         |     707 |     0 |         0 |
-| `replay`   | `VerifierVerify` 4 KiB body                      |    4292 |  4944 |         3 |
-| `replay`   | `VerifierVerifyReplayedParallel`                 |     378 |     3 |         0 |
-| `replay`   | `VerifierMiddleware` no body                     |    1114 |     0 |         0 |
-| `replay`   | `VerifierMiddleware` no body parallel            |     283 |     1 |         0 |
-| `replay`   | `MemoryStoreSeen`                                |     242 |    48 |         1 |
-| `replay`   | `MemoryStoreSeenFreshParallel`                   |     500 |    53 |         1 |
-| `replay`   | `MemoryStoreSeenReplayedParallel`                |     117 |     0 |         0 |
-| `replay`   | `AppendRequestURI` appendRequestURI              |      47 |     0 |         0 |
-| `replay`   | `AppendRequestURI` URL.RequestURI                |      94 |    16 |         1 |
-| `replay`   | `AppendLower` appendLower                        |      20 |     0 |         0 |
-| `replay`   | `AppendLower` strings.ToLower                    |      89 |    16 |         1 |
-| `replay`   | `ExpiryHeap` expiryHeap (1024 entries)           |  170586 |     0 |         0 |
-| `replay`   | `ExpiryHeap` container/heap (1024 entries)       |  216839 |     0 |         0 |
-| `secret`   | `Value` Reveal (1 KiB secret)                    |     1.9 |     0 |         0 |
-| `secret`   | `Value` Equal (1 KiB secret)                     |     363 |     0 |         0 |
+| root       | `Identity` Scopes (one scope)                    |      24 |    16 |         1 |
+| root       | `Identity` HasScope                              |     2.9 |     0 |         0 |
+| root       | `Identity` PeerCertificate                       |     1.9 |     0 |         0 |
+| root       | `Identity` Claim (20-byte value)                 |     136 |    16 |         1 |
+| root       | `Identity` ClaimString (20-byte value)           |     105 |     0 |         0 |
+| root       | `Identity` ClaimInt64                            |      44 |     0 |         0 |
+| root       | `Identity` ClaimFloat64                          |     123 |     0 |         0 |
+| root       | `Identity` ClaimBool                             |     108 |     0 |         0 |
+| root       | `Identity` Claims (four claims)                  |     484 |   360 |         4 |
+| root       | `HasClaim` string                                |     114 |     0 |         0 |
+| root       | `HasClaim` int64                                 |      49 |     0 |         0 |
+| root       | `FacadeEndpoints`                                |      71 |     0 |         0 |
+| root       | `SecurityHeaders`                                |      72 |    48 |         1 |
+| root       | `NewRedactor` (log record)                       |     761 |     0 |         0 |
+| root       | `RedactHeader` (default names)                   |     103 |     0 |         0 |
+| `cred`     | `CachedSourceToken` (hit, expiring token)        |     7.3 |     0 |         0 |
+| `cred`     | `TokenApply` (1.5 KiB token)                     |     685 |  1808 |         2 |
+| `cred`     | `AsSigner` (cached token)                        |      24 |    16 |         1 |
+| `cred`     | `NewTransport` plain (1.5 KiB token)             |     384 |  1024 |         6 |
+| `cred`     | `NewTransport` renewing (1.5 KiB expiring token) |     400 |  1024 |         6 |
+| `cred`     | `SigV4Sign`                                      |     650 |   728 |        13 |
+| `cred`     | `SigV4SignBody` (4 KiB s3 PUT, STS)              |    4118 |  1934 |        18 |
+| `cred`     | `WriteLowerName/writeLowerName` (4 names)        |     156 |   128 |         2 |
+| `cred`     | `WriteLowerName/strings.ToLower` (4 names)       |     279 |   144 |         5 |
+| `cred`     | `AppendQueryComponent/appendQueryComponent`      |     122 |     0 |         0 |
+| `cred`     | `AppendQueryComponent/url` (QueryUnescape+QueryEscape) |     290 |   128 |         3 |
+| `cred`     | `PlainSegments/plainSegments` (Lambda invoke path) |      25 |     0 |         0 |
+| `cred`     | `PlainSegments/strings.Contains` (Lambda invoke path) |      49 |     0 |         0 |
+| `cred`     | `HexString/hexString` (SHA-256 sum)              |      56 |    64 |         1 |
+| `cred`     | `HexString/hex.EncodeToString` (SHA-256 sum)     |      74 |   128 |         2 |
+| `cred`     | `JoinLines/joinLines` (IAM canonical request)    |      96 |   256 |         1 |
+| `cred`     | `JoinLines/strings.Join` (IAM canonical request) |     185 |   512 |         2 |
+| `jsonobj`  | `Iterate`                                        |     244 |     0 |         0 |
+| `syntax`   | `AppendSegment`                                  |     176 |     0 |         0 |
+| `keyedmac` | `MACSum` (43-byte message)                       |     174 |     0 |         0 |
+| `replay`   | `SignerSign` no body                             |    1032 |   160 |         2 |
+| `replay`   | `SignerSign` 4 KiB body                          |    3813 |   208 |         4 |
+| `replay`   | `SignerSignParallel`                             |     208 |   160 |         2 |
+| `replay`   | `VerifierVerify` no body                         |     692 |     0 |         0 |
+| `replay`   | `VerifierVerify` 4 KiB body                      |    4248 |  4934 |         3 |
+| `replay`   | `VerifierVerifyReplayedParallel`                 |     138 |     0 |         0 |
+| `replay`   | `VerifierMiddleware` no body                     |     683 |     0 |         0 |
+| `replay`   | `VerifierMiddleware` no body parallel            |     140 |     0 |         0 |
+| `replay`   | `MemoryStoreSeen`                                |     346 |    48 |         1 |
+| `replay`   | `MemoryStoreSeenFreshParallel`                   |     302 |    48 |         1 |
+| `replay`   | `MemoryStoreSeenReplayedParallel`                |      77 |     0 |         0 |
+| `replay`   | `AppendRequestURI` appendRequestURI              |      18 |     0 |         0 |
+| `replay`   | `AppendRequestURI` URL.RequestURI                |      47 |    16 |         1 |
+| `replay`   | `AppendLower` appendLower                        |      16 |     0 |         0 |
+| `replay`   | `AppendLower` strings.ToLower                    |      62 |    16 |         1 |
+| `replay`   | `ExpiryHeap` expiryHeap (1024 entries)           |  120193 |     0 |         0 |
+| `replay`   | `ExpiryHeap` container/heap (1024 entries)       |  165760 |     0 |         0 |
+| `secret`   | `Value` Reveal (1 KiB secret)                    |     1.8 |     0 |         0 |
+| `secret`   | `Value` Equal (1 KiB secret)                     |     644 |     0 |         0 |
 
 `KeySourceGet` and `KeySourceKeyParallel` call from 32 goroutines at once
 and divide the wall time among them; where they land on the cores moves each
