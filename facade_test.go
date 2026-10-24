@@ -21,6 +21,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ubyte-source/go-authware/v2/internal/problems"
 	"github.com/ubyte-source/go-authware/v2/secret"
 )
 
@@ -476,6 +477,41 @@ func TestValidRedirectURI(t *testing.T) {
 		if got := validRedirectURI(raw); got != want {
 			t.Errorf("validRedirectURI(%q) = %v, want %v", raw, got, want)
 		}
+	}
+}
+
+func TestFacadeConfigValidate(t *testing.T) {
+	const upstreamProblem = "facade upstream resource"
+	tests := []struct {
+		name     string
+		facade   FacadeConfig
+		required []string
+		want     string
+	}{
+		{"prefix without id", FacadeConfig{ScopePrefix: "api://x"}, nil, "facade client ID"},
+		{"secret without id", FacadeConfig{ClientSecret: secret.New("s")}, nil, "facade client ID"},
+		{"resource without id", FacadeConfig{UpstreamResource: testUpstreamRes}, nil, "facade client ID"},
+		{"spaced prefix", FacadeConfig{ClientID: testClientID, ScopePrefix: "api://app https://graph.microsoft.com"},
+			nil, "facade scope prefix"},
+		{"relative resource", FacadeConfig{ClientID: testClientID, UpstreamResource: "not-a-uri"}, nil,
+			upstreamProblem},
+		{"resource fragment", FacadeConfig{ClientID: testClientID, UpstreamResource: "https://api.example/#f"}, nil,
+			upstreamProblem},
+		{"resource space", FacadeConfig{ClientID: testClientID, UpstreamResource: "urn:a b"}, nil, upstreamProblem},
+		{"unparsable resource", FacadeConfig{ClientID: testClientID, UpstreamResource: "https://a b/"}, nil,
+			upstreamProblem},
+		{"foreign scope", FacadeConfig{ClientID: testClientID, ScopePrefix: "api://app"}, []string{testRead, "urn:y"},
+			`scope "urn:y" names a resource outside`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := problems.New(ErrInvalidConfig)
+			tc.facade.validate(p, tc.required)
+			if got := recorded(p); len(got) != 1 || !errors.Is(got[0], ErrInvalidConfig) ||
+				!strings.Contains(got[0].Error(), tc.want) {
+				t.Fatalf("validate = %v, want one problem wrapping ErrInvalidConfig with %q", got, tc.want)
+			}
+		})
 	}
 }
 

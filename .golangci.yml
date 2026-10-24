@@ -1,9 +1,5 @@
 version: "2"
 
-run:
-  tests: true
-  go: "1.25.1"
-
 linters:
   default: none
   enable:
@@ -95,122 +91,71 @@ linters:
     errcheck:
       check-type-assertions: true
       check-blank: true
-    gosec:
-      severity: low
-      confidence: low
     govet:
       enable-all: true
-      # Structs group semantically related fields; fieldalignment would force
-      # pointer-first ordering and scatter every topic across size classes.
+      # Fields keep the order of their role: no reorder shrinks a production struct, and
+      # the pointer-first order would only shorten what the garbage collector scans.
       disable:
         - fieldalignment
     staticcheck:
       checks: ["all"]
     revive:
       enable-all-rules: true
-      severity: warning
       rules:
-        - name: exported
-          severity: warning
-        - name: var-naming
-          severity: warning
-        - name: package-comments
-          severity: warning
-        - name: blank-imports
-        - name: context-as-argument
-        - name: context-keys-type
-        - name: dot-imports
-        - name: error-return
-        - name: error-strings
-        - name: error-naming
-        - name: if-return
-        - name: increment-decrement
-        - name: range
-        - name: receiver-naming
-        - name: indent-error-flow
-        - name: empty-block
-        - name: superfluous-else
-        - name: unused-parameter
-        - name: unreachable-code
-        - name: redefines-builtin-id
-        - name: bool-literal-in-expr
-        - name: constant-logical-expr
+        # Code counts with 0, 1 and 2, a string read up to three times stays where it is
+        # read, and the literals of a test are its data.
         - name: add-constant
+          exclude: ["TEST"]
           arguments:
-            - maxLitCount: "3"
-              allowStrs: '""'
-              allowInts: "0,1,2"
-              allowFloats: "0.0,0.,1.0,1.,2.0,2."
-              ignoreFuncs: "os\\.*,fmt\\.Println,make"
-        - name: cognitive-complexity
-          arguments: [20]
-        - name: line-length-limit
-          arguments: [120]
-        - name: cyclomatic
-          arguments: [10]
-        - name: function-length
-          arguments: [40, 65]
+            - allowInts: "0,1,2"
+              maxLitCount: "3"
+        # A switch lists the cases it acts on; exhaustive checks every enum switch.
         - name: enforce-switch-style
           arguments: ["allowNoDefault"]
-        # The calls errcheck excludes by default, so both linters agree.
+        # Examples print, and a strings.Builder write never fails.
         - name: unhandled-error
           arguments:
-            - "^fmt\\.Print(f|ln)?$"
+            - "^fmt\\.Println$"
             - "^strings\\.Builder\\.Write(Byte|Rune|String)?$"
-            - "^bytes\\.Buffer\\.Write(Byte|Rune|String)?$"
-    godot:
-      scope: declarations
-    # Named results are the house style, so a naked return anywhere is the
-    # hazard this catches; the default only looks at functions over 30 lines.
+        # One measure, one limit: the thresholds of gocognit, funlen and lll.
+        - name: cognitive-complexity
+          arguments: [20]
+        - name: function-length
+          arguments: [40, 60]
+        - name: line-length-limit
+          arguments: [120]
+    # A naked return is reported in a function of any length.
     nakedret:
-      max-func-lines: 1
+      max-func-lines: 0
     gocyclo:
       min-complexity: 10
     gocognit:
       min-complexity: 20
-    funlen:
-      lines: 65
-      statements: 40
     goconst:
       min-len: 2
-      min-occurrences: 4
-    gomoddirectives:
-      replace-local: true
+      # The literals of a test are its data.
+      ignore-tests: true
     gocritic:
       enabled-tags:
-        - diagnostic
-        - style
         - performance
         - experimental
         - opinionated
-    lll:
-      line-length: 120
     misspell:
       locale: US
     prealloc:
-      simple: true
-      range-loops: true
       for-loops: true
-    dupl:
-      threshold: 150
     nolintlint:
-      allow-unused: false
       require-explanation: true
       require-specific: true
     perfsprint:
-      int-conversion: true
       err-error: true
-      errorf: true
-      sprintf1: true
-      strconcat: true
     depguard:
       rules:
         main:
           deny:
             - pkg: github.com/stretchr/testify
               desc: tests assert with the standard library
-        # go-authware only: production code parses JSON through go-jsonfast and
-        # stays memory safe.
+        # Production code parses JSON through go-jsonfast and stays memory safe.
         production:
           files:
             - "!$test"
@@ -219,10 +164,11 @@ linters:
               desc: JSON goes through go-jsonfast
             - pkg: unsafe
               desc: production code stays memory safe
+    # A default is the branch for every other value, as Go's return rules want it.
     exhaustive:
       default-signifies-exhaustive: true
     gomodguard_v2:
-      # go-authware only: go-jsonfast is its one dependency.
+      # go-jsonfast is the one dependency.
       allowed:
         - module: github.com/ubyte-source/go-jsonfast
       blocked:
@@ -246,9 +192,8 @@ linters:
       key-naming-case: snake
       forbidden-keys:
         - err
-    # Errors of go-authware's internal packages carry their context, and a type
-    # that decorates one of these interfaces returns its delegate's errors as
-    # they are.
+    # The internal packages return errors that carry their context or the sentinel the
+    # caller passes, and a decorator returns its delegate's errors as they are.
     wrapcheck:
       ignore-package-globs:
         - github.com/ubyte-source/go-authware/v2/internal/*
@@ -262,20 +207,10 @@ formatters:
     - gofmt
     - goimports
   settings:
-    gofmt:
-      simplify: true
     goimports:
       local-prefixes:
-        - github.com/
+        - github.com/ubyte-source/go-authware
 
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-
-output:
-  formats:
-    text: {}
-  sort-order:
-    - linter
-    - file
-  show-stats: true

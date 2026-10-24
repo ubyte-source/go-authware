@@ -46,7 +46,7 @@ const (
 )
 
 func TestOAuthConfigValidate(t *testing.T) {
-	const plainURL, upstreamProblem = "http://idp.example", "facade upstream resource"
+	const plainURL = "http://idp.example"
 	tests := []struct {
 		name string
 		edit func(o *OAuthConfig)
@@ -69,34 +69,12 @@ func TestOAuthConfigValidate(t *testing.T) {
 		{"plain resource", func(o *OAuthConfig) { o.Resource.Identifier = "http://r.example" }, "resource identifier"},
 		{"plain server", func(o *OAuthConfig) { o.Resource.AuthorizationServers = []string{plainURL} },
 			"authorization"},
-		{"facade without id", func(o *OAuthConfig) { o.Facade.ScopePrefix = "api://x" }, "facade client ID"},
-		{"secret without id", func(o *OAuthConfig) { o.Facade.ClientSecret = secret.New("s") }, "facade client ID"},
-		{"resource without id", func(o *OAuthConfig) { o.Facade.UpstreamResource = kidR }, "facade client ID"},
-		{"spaced prefix", func(o *OAuthConfig) {
-			o.Facade = FacadeConfig{ClientID: testClientID, ScopePrefix: "api://app https://graph.microsoft.com"}
-		}, "facade scope prefix"},
-		{"relative resource", func(o *OAuthConfig) {
-			o.Facade = FacadeConfig{ClientID: testClientID, UpstreamResource: "not-a-uri"}
-		}, upstreamProblem},
-		{"resource fragment", func(o *OAuthConfig) {
-			o.Facade = FacadeConfig{ClientID: testClientID, UpstreamResource: "https://api.example/#f"}
-		}, upstreamProblem},
-		{"resource space", func(o *OAuthConfig) {
-			o.Facade = FacadeConfig{ClientID: testClientID, UpstreamResource: "urn:a b"}
-		}, upstreamProblem},
-		{"unparsable resource", func(o *OAuthConfig) {
-			o.Facade = FacadeConfig{ClientID: testClientID, UpstreamResource: "https://a b/"}
-		}, upstreamProblem},
 		{"facade servers", func(o *OAuthConfig) {
 			o.Facade.ClientID, o.Resource.AuthorizationServers = testClientID, []string{testIssuerURL}
 		}, "authorization servers and facade client ID are exclusive"},
 		{"facade uri scope", func(o *OAuthConfig) {
 			o.Facade.ClientID, o.RequiredScopes = testClientID, []string{"https://api.example.com/read"}
 		}, `scope "https://api.example.com/read" names a resource outside`},
-		{"facade foreign scope", func(o *OAuthConfig) {
-			o.Facade, o.RequiredScopes = FacadeConfig{ClientID: testClientID, ScopePrefix: "api://app"}, []string{kidA,
-				"urn:y"}
-		}, `scope "urn:y" names a resource outside`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

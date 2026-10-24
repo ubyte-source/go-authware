@@ -37,66 +37,85 @@ func rewritePolicies() (entra, withResource, bare paramPolicy) {
 	return entra, withResource, newParamPolicy(&FacadeConfig{ClientID: testFacadeClient}, nil)
 }
 
-func TestParamPolicyRewrite(t *testing.T) {
+func TestParamPolicyAuthorize(t *testing.T) {
 	entra, withResource, bare := rewritePolicies()
 	const (
 		client, scope, resource = oauthwire.ParamClientID, oauthwire.ParamScope, oauthwire.ParamResource
-		grant, refresh          = oauthwire.ParamGrantType, oauthwire.GrantRefreshToken
 		qualified, hint         = testScopePrefix + "/" + testScopeMemory, "login_hint"
 		openQualified           = "openid offline_access " + qualified
 	)
 	tests := []struct {
 		name    string
 		policy  paramPolicy
-		rewrite func(*paramPolicy, url.Values) (url.Values, bool)
 		in, out url.Values
 	}{
 		{
-			"authorize claude", entra, (*paramPolicy).authorize,
+			"claude", entra,
 			url.Values{client: {"dcr-id"}, scope: {testScopeMemory}, resource: {testMCPResource}, hint: {testHint}},
 			url.Values{client: {testFacadeClient}, scope: {openQualified}, hint: {testHint}},
 		},
 		{
-			"authorize default scopes", entra, (*paramPolicy).authorize,
+			"default scopes", entra,
 			url.Values{hint: {testHint}},
 			url.Values{client: {testFacadeClient}, scope: {openQualified}, hint: {testHint}},
 		},
 		{
-			"authorize mixed scopes", entra, (*paramPolicy).authorize,
+			"mixed scopes", entra,
 			url.Values{scope: {"profile  " + testScopePrefix + "/x memory:read memory openid memory"}},
 			url.Values{client: {testFacadeClient}, scope: {"openid offline_access profile " +
 				testScopePrefix + "/x " + testScopePrefix + "/memory:read " + qualified}},
 		},
 		{
-			"authorize upstream resource", withResource, (*paramPolicy).authorize,
+			"upstream resource", withResource,
 			url.Values{resource: {testMCPResource}},
 			url.Values{client: {testFacadeClient}, scope: {openQualified}, resource: {testUpstreamRes}},
 		},
 		{
-			"authorize without prefix", bare, (*paramPolicy).authorize,
+			"without prefix", bare,
 			url.Values{scope: {testScopeMemory}},
 			url.Values{client: {testFacadeClient}, scope: {"openid offline_access memory"}},
 		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := tc.policy.authorize(tc.in); !ok || !maps.EqualFunc(got, tc.out, slices.Equal) {
+				t.Fatalf("authorize(%v) = %v, %v; want %v, true", tc.in, got, ok, tc.out)
+			}
+		})
+	}
+}
+
+func TestParamPolicyToken(t *testing.T) {
+	entra, withResource, _ := rewritePolicies()
+	const (
+		client, scope, resource = oauthwire.ParamClientID, oauthwire.ParamScope, oauthwire.ParamResource
+		grant, refresh          = oauthwire.ParamGrantType, oauthwire.GrantRefreshToken
+	)
+	tests := []struct {
+		name    string
+		policy  paramPolicy
+		in, out url.Values
+	}{
 		{
-			"token without scope", entra, (*paramPolicy).token,
+			"without scope", entra,
 			url.Values{grant: {refresh}, resource: {testMCPResource}},
 			url.Values{grant: {refresh}, client: {testFacadeClient}},
 		},
 		{
-			"token scope", entra, (*paramPolicy).token,
+			"scope", entra,
 			url.Values{scope: {"memory offline_access"}},
-			url.Values{client: {testFacadeClient}, scope: {qualified + " offline_access"}},
+			url.Values{client: {testFacadeClient}, scope: {testScopePrefix + "/memory offline_access"}},
 		},
 		{
-			"token upstream resource", withResource, (*paramPolicy).token,
+			"upstream resource", withResource,
 			url.Values{},
 			url.Values{client: {testFacadeClient}, resource: {testUpstreamRes}},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got, ok := tc.rewrite(&tc.policy, tc.in); !ok || !maps.EqualFunc(got, tc.out, slices.Equal) {
-				t.Fatalf("rewrite(%v) = %v, %v; want %v, true", tc.in, got, ok, tc.out)
+			if got, ok := tc.policy.token(tc.in); !ok || !maps.EqualFunc(got, tc.out, slices.Equal) {
+				t.Fatalf("token(%v) = %v, %v; want %v, true", tc.in, got, ok, tc.out)
 			}
 		})
 	}
