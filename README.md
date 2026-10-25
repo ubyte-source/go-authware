@@ -821,7 +821,7 @@ vulnerabilities through GitHub's private reporting flow described there.
 ## Dependencies
 
 ```
-github.com/ubyte-source/go-jsonfast v0.3.1
+github.com/ubyte-source/go-jsonfast v0.4.0
 ```
 
 No `golang.org/x/oauth2`, no cloud SDKs: every protocol is implemented
