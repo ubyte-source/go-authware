@@ -316,6 +316,12 @@ func TestParseJWKS(t *testing.T) {
 	}
 }
 
+// repeatingKeySet returns a JWKS whose keys hold a usable Ed25519 key, then an object
+// that repeats a name.
+func repeatingKeySet() string {
+	return `{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + strings.Repeat("0", 43) + `"},{"":"","":""}]}`
+}
+
 func TestParseJWKSInvalid(t *testing.T) {
 	good := publicJWK(t, testRSAKey(), nil)
 	encKey := withMembers(good, map[string]any{testMemberUse: "enc"})
@@ -326,7 +332,7 @@ func TestParseJWKSInvalid(t *testing.T) {
 	}
 	for _, doc := range []string{
 		`{}`, `{"keys":{}}`, `{"keys":"x"}`, jsonEmptyArray, `{"keys":[]}`, `{"keys":[]} x`, `{"keys":[],"keys":[]}`,
-		`{"keys":[` + mustJSON(t, good) + `}`,
+		`{"keys":[` + mustJSON(t, good) + `}`, repeatingKeySet(),
 	} {
 		if set, err := parseJWKS(doc); set != nil || !errors.Is(err, errInvalidJWKS) {
 			t.Errorf("parseJWKS(%.40s) = %+v, %v, want nil, errInvalidJWKS", doc, set, err)
@@ -506,7 +512,7 @@ func FuzzParseJWKS(f *testing.F) {
 	f.Add(`{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"a","x":"` + strings.Repeat("A", 43) + `"},` +
 		`{"kty":"OKP","crv":"Ed25519","kid":"a","alg":"ES256","x":"` + strings.Repeat("A", 43) + `"}]}`)
 	f.Add(`{"keys":[{"kty":"OKP","kty":"RSA"}],"x":` + "\"\\udc00\"}")
-	f.Add(`{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + strings.Repeat("A", 43) + `"},{"":"","":""}]}`)
+	f.Add(repeatingKeySet())
 	f.Add(`{"keys":[{"kty":"OKP","crv":"Ed25519","x":"` + strings.Repeat("A", 43) + `"}],` +
 		`"x":1e400,"y":[{"a":-1E+999}]}`)
 	f.Fuzz(func(t *testing.T, doc string) {

@@ -959,7 +959,8 @@ func FuzzVerifierVerify(f *testing.F) {
 }
 
 // addVerifierSeeds adds the seeds of FuzzVerifierVerify: valid and skewed requests,
-// a body over the limit, one of each mutation and the edge envelope values.
+// a body over the limit, one of each mutation, the edge envelope values and a host
+// that net/http sends empty.
 func addVerifierSeeds(f *testing.F) {
 	f.Helper()
 	f.Add(http.MethodGet, "api.example", "/v1/items", "a=1", []byte(nil),
@@ -979,6 +980,7 @@ func addVerifierSeeds(f *testing.F) {
 	} {
 		f.Add("", "", "", "", []byte(nil), int32(0), uint8(setEnvelope), uint16(0), byte(0), raw)
 	}
+	f.Add("0", " ", "0", "0", []byte("0"), int32(seedSkew), uint8(0), uint16(seedPos), byte(caseBit), "0")
 }
 
 func BenchmarkVerifierVerify(b *testing.B) {

@@ -301,12 +301,32 @@ func TestSubjectDN(t *testing.T) {
 	}
 }
 
+// unnamedArc ends an X.520 type that pkix.Name.String writes dotted, not by name.
+const unnamedArc = 85
+
+// TestSubjectDNOutsideUTF8 writes each byte outside UTF-8 as U+FFFD, and a dotted
+// type's value that has no DER encoding as text, which no allowed subject spells.
+func TestSubjectDNOutsideUTF8(t *testing.T) {
+	n := pkix.Name{CommonName: "0", Organization: []string{"\x83"}, Names: []pkix.AttributeTypeAndValue{
+		{Type: asn1.ObjectIdentifier{1, 2, unnamedArc}, Value: "0"}, {Type: x520(unnamedArc), Value: "\x83"},
+	}}
+	const want = "CN=0,O=\ufffd,2.5.4.85=\ufffd,1.2.85=#130130"
+	got := subjectDN(&n)
+	if got != want {
+		t.Fatalf("subjectDN(%+v) = %q, want %q", n, got, want)
+	}
+	if renderedSubject(got) {
+		t.Fatalf("renderedSubject(%q) = true, want false: a dotted value without DER spells no subject", got)
+	}
+}
+
 // FuzzSubjectDN renders fuzzed names as the standard library does, and reads
 // each rendering of UTF-8 values back as itself.
 func FuzzSubjectDN(f *testing.F) {
 	f.Add("admin", "corp", "a@b.example", intValue)
 	f.Add(` #a,b+c"d\e<f>g;h `, "", "", 0)
 	f.Add("a\xff", "+", "\xfe", otherArc)
+	f.Add("0", "\x83", "0", unnamedArc)
 	f.Fuzz(func(t *testing.T, cn, org, value string, arc int) {
 		n := pkix.Name{CommonName: cn, Names: []pkix.AttributeTypeAndValue{
 			{Type: asn1.ObjectIdentifier{1, 2, arc & maxArc}, Value: value},

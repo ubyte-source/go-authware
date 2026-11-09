@@ -175,12 +175,27 @@ func TestAppendHost(t *testing.T) {
 	}
 }
 
+// emptiedHost is a host net/http sends empty, as its Host header check refuses a space.
+const emptiedHost = "000000 "
+
+// TestAppendHostKeepsAHostNetHTTPEmpties appends emptiedHost as it is, the reference,
+// though net/http sends it empty.
+func TestAppendHostKeepsAHostNetHTTPEmpties(t *testing.T) {
+	t.Parallel()
+	if sent, ok := wireHost(emptiedHost); !ok || sent != "" {
+		t.Fatalf("net/http sends the host %q as %q, written %t; want it empty", emptiedHost, sent, ok)
+	}
+	if got, want := string(appendHost([]byte(prefix), emptiedHost)), prefix+emptiedHost; got != want {
+		t.Errorf("appendHost(%q) = %q, want %q, the host as it is", emptiedHost, got, want)
+	}
+}
+
 // FuzzAppendHost checks appendHost against the reference for every host, and
 // against the host net/http settles on for every valid ASCII host: net/http
 // sends an invalid one empty.
 func FuzzAppendHost(f *testing.F) {
 	for _, seed := range []string{
-		"a.example:80", "[fe80::1%en0]:80", "[a%b%c]:1", "[a%b]%c", "[x", "x%y]:80", "a b", "[\xff%\n]",
+		"a.example:80", "[fe80::1%en0]:80", "[a%b%c]:1", "[a%b]%c", "[x", "x%y]:80", emptiedHost, "[\xff%\n]",
 		"AZ@[`{.Example",
 	} {
 		f.Add(seed)
