@@ -12,11 +12,14 @@ type JWS struct {
 	Signature string
 }
 
+// segmentEnd separates the segments of a compact JWS.
+const segmentEnd = "."
+
 // SplitJWS splits s at its dots, reporting false unless there are exactly two.
 func SplitJWS(s string) (JWS, bool) {
-	header, rest, first := strings.Cut(s, ".")
-	payload, signature, second := strings.Cut(rest, ".")
-	if !first || !second || strings.Contains(signature, ".") {
+	header, rest, first := strings.Cut(s, segmentEnd)
+	payload, signature, second := strings.Cut(rest, segmentEnd)
+	if !first || !second || strings.Contains(signature, segmentEnd) {
 		return JWS{}, false
 	}
 	return JWS{Header: header, Payload: payload, Signature: signature}, true

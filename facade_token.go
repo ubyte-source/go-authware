@@ -14,6 +14,9 @@ import (
 	"github.com/ubyte-source/go-authware/v2/internal/syntax"
 )
 
+// headerContentType names the media type of a body.
+const headerContentType = "Content-Type"
+
 var (
 	errUpstreamStatus = errors.New("upstream answered neither 2xx nor 4xx")
 	errBodyNotAllowed = errors.New("upstream answered 204 with a body")
@@ -50,7 +53,7 @@ func (f *facade) serveToken(w http.ResponseWriter, r *http.Request) {
 // readTokenRequest decodes a form of unique parameters that checkGrant
 // accepts.
 func readTokenRequest(r *http.Request) (url.Values, *endpointError) {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get(headerContentType))
 	if err != nil || mediaType != oauthwire.FormContentType {
 		return nil, badRequest(codeInvalidRequest, "content type must be "+oauthwire.FormContentType)
 	}
@@ -129,8 +132,8 @@ func (f *facade) post(ctx context.Context, endpoint *url.URL, vals url.Values) (
 // body: its status, body, Content-Type and WWW-Authenticate, marked uncacheable.
 func writeUpstreamAnswer(w http.ResponseWriter, ans oauthwire.Answer) {
 	h := w.Header()
-	h["Content-Type"] = nil // no sniffed type when the answer has none
-	for _, k := range []string{"Content-Type", "WWW-Authenticate"} {
+	h[headerContentType] = nil // no sniffed type when the answer has none
+	for _, k := range []string{headerContentType, "WWW-Authenticate"} {
 		for _, v := range ans.Header.Values(k) {
 			h.Add(k, v)
 		}

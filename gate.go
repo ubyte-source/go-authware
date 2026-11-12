@@ -26,6 +26,12 @@ const (
 // bearerMethodHeader is the only bearer token transport accepted.
 const bearerMethodHeader = "header"
 
+// The method prefixes of the route patterns.
+const (
+	routeGet  = http.MethodGet + " "
+	routePost = http.MethodPost + " "
+)
+
 // The values of a check answer's headers, by their place in the array they share.
 const (
 	checkCache = iota
@@ -190,13 +196,13 @@ func (g *Gate) Mount(mux *http.ServeMux, endpoints ...string) {
 	slices.Sort(patterns)
 	metadata := g.resourceMetadata(first, oauth.required)
 	for _, p := range slices.Compact(patterns) {
-		mux.Handle("GET "+p, metadata)
+		mux.Handle(routeGet+p, metadata)
 	}
 	if f := g.authServer; f != nil {
-		mux.HandleFunc("GET "+pathServerMetadata, f.serveMetadata)
-		mux.HandleFunc("GET "+pathAuthorize, f.serveAuthorize)
-		mux.HandleFunc("POST "+pathRegister, f.serveRegister)
-		mux.HandleFunc("POST "+pathToken, f.serveToken)
+		mux.HandleFunc(routeGet+pathServerMetadata, f.serveMetadata)
+		mux.HandleFunc(routeGet+pathAuthorize, f.serveAuthorize)
+		mux.HandleFunc(routePost+pathRegister, f.serveRegister)
+		mux.HandleFunc(routePost+pathToken, f.serveToken)
 	}
 }
 

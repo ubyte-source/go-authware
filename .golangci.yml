@@ -102,13 +102,11 @@ linters:
     revive:
       enable-all-rules: true
       rules:
-        # Code counts with 0, 1 and 2, a string read up to three times stays where it is
-        # read, and the literals of a test are its data.
+        # Code counts with 0, 1 and 2, and the literals of a test are its data.
         - name: add-constant
           exclude: ["TEST"]
           arguments:
             - allowInts: "0,1,2"
-              maxLitCount: "3"
         # A switch lists the cases it acts on; exhaustive checks every enum switch.
         - name: enforce-switch-style
           arguments: ["allowNoDefault"]

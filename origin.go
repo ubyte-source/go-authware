@@ -54,7 +54,7 @@ func forwardedProto(h http.Header) string {
 // request vary by host and scheme, so only a fixed origin allows shared caches.
 func (o originResolver) writeDocument(w http.ResponseWriter, body []byte) {
 	h := w.Header()
-	h.Set("Content-Type", oauthwire.JSONContentType)
+	h.Set(headerContentType, oauthwire.JSONContentType)
 	if o.public != "" {
 		h.Set("Cache-Control", "public, max-age=300")
 	} else {

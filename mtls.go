@@ -55,7 +55,7 @@ func (m *MTLSConfig) validate(p *problems.List) {
 // renderedSubject reports whether s, a subject entry, is a common name or a
 // distinguished name that subjectDN renders exactly as written.
 func renderedSubject(s string) bool {
-	if !strings.Contains(s, "=") {
+	if !strings.Contains(s, typeEnd) {
 		return subjectDN(&pkix.Name{CommonName: unescaped(s)}) == "CN="+s
 	}
 	rdns := parseDN(s)
@@ -178,6 +178,9 @@ func splitDN(dn string) [][]string {
 	return append(rdns, append(rdn, dn[start:]))
 }
 
+// typeEnd ends the type of a subject attribute, before its value.
+const typeEnd = "="
+
 // X.520 attribute types have the x520Arcs arcs 2.5.4.n, n the last arc of a
 // type below; pkix.Name keeps one common name and one serial number, the last
 // of each, and its String names x520Named types.
@@ -237,7 +240,7 @@ func x520Name(t asn1.ObjectIdentifier) string {
 // its escaped value, or a dotted OID with the hex of a DER string after '#',
 // the only values a certificate's subject holds; ok is false for any other.
 func parseAttribute(attr string) (pkix.AttributeTypeAndValue, bool) {
-	typ, value, _ := strings.Cut(attr, "=")
+	typ, value, _ := strings.Cut(attr, typeEnd)
 	for _, x := range x520Types() {
 		if x.name == typ {
 			oid := asn1.ObjectIdentifier{arcJointISOITUT, arcDS, arcAttributeType, x.arc}
@@ -337,7 +340,7 @@ func newMTLSAuthenticator(c MTLSConfig) *mtlsAuthenticator {
 		rejected: failure(ErrInvalidCredentials, "client certificate rejected", nil),
 	}
 	for _, s := range c.AllowedSubjects {
-		if strings.Contains(s, "=") {
+		if strings.Contains(s, typeEnd) {
 			a.dnames[s] = struct{}{}
 		} else {
 			a.cns[unescaped(s)] = struct{}{}

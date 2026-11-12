@@ -25,10 +25,9 @@ import (
 
 // Header names and sizes of the token tests.
 const (
-	headerContentType = "Content-Type"
-	headerPragma      = "Pragma"
-	kib               = 1 << 10
-	mib               = 1 << 20
+	headerPragma = "Pragma"
+	kib          = 1 << 10
+	mib          = 1 << 20
 )
 
 func tokenRequest(tb testing.TB, body, contentType string) *http.Request {

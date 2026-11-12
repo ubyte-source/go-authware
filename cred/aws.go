@@ -367,8 +367,9 @@ type queryPair struct{ encName, encValue []byte }
 
 // Scratch bounds of a signature: the most bytes the AWS encoding writes for one
 // byte, and how many query pairs and header fields are sorted without a heap
-// slice.
+// slice; pairEnd ends each pair of a query.
 const (
+	pairEnd      = "&"
 	encodedWidth = len("%XX")
 	queryStack   = 8
 	headerStack  = 16
@@ -382,9 +383,9 @@ func canonicalQuery(raw string) string {
 		return ""
 	}
 	var stack [queryStack]queryPair
-	pairs := slices.Grow(stack[:0], strings.Count(raw, "&")+1)
+	pairs := slices.Grow(stack[:0], strings.Count(raw, pairEnd)+1)
 	arena := make([]byte, 0, encodedWidth*len(raw)+len("=&"))
-	for part := range strings.SplitSeq(raw, "&") {
+	for part := range strings.SplitSeq(raw, pairEnd) {
 		if part == "" {
 			continue
 		}
@@ -409,7 +410,7 @@ func canonicalQuery(raw string) string {
 		b.Write(p.encValue)
 		b.WriteByte('&')
 	}
-	return strings.TrimSuffix(b.String(), "&")
+	return strings.TrimSuffix(b.String(), pairEnd)
 }
 
 // appendQueryComponent appends s to dst decoded as a form value and
