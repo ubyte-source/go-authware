@@ -29,7 +29,7 @@ make ci
 4. Open a pull request describing what changes, why, and how it was tested.
 
 `make ci` runs these targets, and the workflows run the same ones: `lint.yml`
-runs `vet`, `lint` and `deadcode`, `test.yml` runs `modcheck`, `test`, `cover`
+runs `lint` and `deadcode`, `test.yml` runs `modcheck`, `vet`, `test`, `cover`
 and `bench-smoke` on Go 1.25.14 and 1.27.4, `security.yml` runs `vuln` next to
 CodeQL.
 

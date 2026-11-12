@@ -32,6 +32,9 @@ jobs:
       - name: Verify dependencies
         run: make modcheck
 
+      - name: Run go vet
+        run: make vet
+
       - name: Run the tests without the race detector
         run: make test
 

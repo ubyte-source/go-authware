@@ -197,11 +197,10 @@ services. It defends against:
 - `make ci` runs every gate below but CodeQL and fuzzing, and the workflows
   run the same Makefile targets.
 - `make modcheck` (`go mod download`, `go mod verify`, `go mod tidy -diff`),
-  `make test` (the tests with `-shuffle=on` and their allocation counts),
-  `make cover` (the tests with `-race` and `-shuffle=on`, failing below 100%
-  statement coverage) and `make bench-smoke` (100 iterations of every
-  benchmark) on Go 1.25.14 and Go 1.27.4 (`test.yml`); `make vet`
-  (`lint.yml`).
+  `make vet`, `make test` (the tests with `-shuffle=on` and their allocation
+  counts), `make cover` (the tests with `-race` and `-shuffle=on`, failing
+  below 100% statement coverage) and `make bench-smoke` (100 iterations of
+  every benchmark) on Go 1.25.14 and Go 1.27.4 (`test.yml`).
 - `golangci-lint` v2.15.0, built with Go 1.27.4 (`lint.yml`, `make lint`),
   with the repository `.golangci.yml`: every linter of its enable list and the
   `gofmt` and `goimports` formatters, `gosec` included, test files linted. The

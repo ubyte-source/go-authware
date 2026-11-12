@@ -25,5 +25,5 @@ jobs:
         with:
           go-version: "1.27.4"
 
-      - name: Run go vet, golangci-lint and deadcode
-        run: make vet lint deadcode
+      - name: Run golangci-lint and deadcode
+        run: make lint deadcode
