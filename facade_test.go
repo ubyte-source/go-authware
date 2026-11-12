@@ -21,6 +21,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ubyte-source/go-authware/v2/internal/oauthwire"
 	"github.com/ubyte-source/go-authware/v2/internal/problems"
 	"github.com/ubyte-source/go-authware/v2/secret"
 )
@@ -556,4 +557,32 @@ func ExampleFacadeConfig() {
 		"https://mcp.example.com/register", strings.NewReader(`{"redirect_uris":["http://127.0.0.1:8765/cb"]}`)))
 	fmt.Println(w.Code)
 	// Output: 201
+}
+
+// FuzzFacadeServeMetadata checks that a strict reader reads back the document of any
+// request host: the issuer and the endpoints under it, as written.
+func FuzzFacadeServeMetadata(f *testing.F) {
+	for _, host := range []string{
+		"mcp.example.com", "", `a"b\c`, "h\xff", "\u2028<&>", "[::1]:8443", "x\x00y\x7f", "\xed\xa0\x80", `\ud800`,
+	} {
+		f.Add(host)
+	}
+	f.Fuzz(func(t *testing.T, host string) {
+		fac := testFacade(t, facadeConfig(newFakeIDP(t)))
+		r := newReq(t, http.MethodGet, pathServerMetadata, http.NoBody)
+		r.Host = host
+		w := serve(http.HandlerFunc(fac.serveMetadata), r)
+		origin := "http://" + host
+		want := object(
+			textMember(metaIssuer, origin), textMember(metaAuthorizationEndpoint, origin+pathAuthorize),
+			textMember(metaTokenEndpoint, origin+pathToken), textMember("registration_endpoint", origin+pathRegister),
+			arrayMember("scopes_supported", testScopeMemory, scopeOfflineAccess),
+			arrayMember("response_types_supported", responseTypeCode),
+			arrayMember("grant_types_supported", grantAuthorizationCode, oauthwire.GrantRefreshToken),
+			arrayMember("token_endpoint_auth_methods_supported", authMethodNone),
+			arrayMember("code_challenge_methods_supported", pkceMethodS256))
+		if got := readBack(t, w.Body.Bytes()); w.Code != http.StatusOK || !slices.Equal(got, want) {
+			t.Fatalf("metadata of host %q = %d %s, read back as %q, want 200 %q", host, w.Code, w.Body, got, want)
+		}
+	})
 }

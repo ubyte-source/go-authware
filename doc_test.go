@@ -41,6 +41,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ubyte-source/go-jsonfast"
+
 	"github.com/ubyte-source/go-authware/v2/internal/netguard"
 	"github.com/ubyte-source/go-authware/v2/internal/oauthwire"
 	"github.com/ubyte-source/go-authware/v2/internal/problems"
@@ -953,6 +955,53 @@ func oauthErrorCode(tb testing.TB, w *httptest.ResponseRecorder) string {
 		tb.Fatalf("error Cache-Control = %q, want %q", w.Header().Get("Cache-Control"), oauthwire.CacheNoStore)
 	}
 	return body.Error
+}
+
+// readBack fails tb unless out is a UTF-8 JSON object that the strict readers of
+// go-jsonfast accept, and returns its tokens as encoding/json reads them.
+func readBack(tb testing.TB, out []byte) []json.Token {
+	tb.Helper()
+	number := func(raw []byte) any { return string(raw) }
+	if _, err := jsonfast.DecodeValue(out, jsonfast.MaxDepth, number); err != nil || !utf8.Valid(out) {
+		tb.Fatalf("DecodeValue(%q) = %v, want nil for UTF-8", out, err)
+	}
+	if !jsonfast.ValidUTF8(out, jsonfast.MaxDepth) {
+		tb.Fatalf("ValidUTF8(%q) = false, want true", out)
+	}
+	if err := jsonfast.IterateMembers(out, func(_, _ []byte) error { return nil }); err != nil {
+		tb.Fatalf("IterateMembers(%q) = %v, want nil", out, err)
+	}
+	var tokens []json.Token
+	for dec := json.NewDecoder(bytes.NewReader(out)); ; {
+		token, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return tokens
+		}
+		if err != nil {
+			tb.Fatalf("encoding/json reading %q = %v, want its tokens", out, err)
+		}
+		tokens = append(tokens, token)
+	}
+}
+
+// textMember returns the tokens of the member name with the string value s as a
+// JSON writer encodes it: each byte of invalid UTF-8 is the replacement character.
+func textMember(name, s string) []json.Token {
+	return []json.Token{name, string([]rune(s))}
+}
+
+// object returns the tokens of a JSON object of the members.
+func object(members ...[]json.Token) []json.Token {
+	return slices.Concat([]json.Token{json.Delim('{')}, slices.Concat(members...), []json.Token{json.Delim('}')})
+}
+
+// arrayMember returns the tokens of the member name, an array of the strings.
+func arrayMember(name string, elems ...string) []json.Token {
+	tokens := []json.Token{name, json.Delim('[')}
+	for _, e := range elems {
+		tokens = append(tokens, e)
+	}
+	return append(tokens, json.Delim(']'))
 }
 
 // testFacade returns the facade of the Gate built from cfg.

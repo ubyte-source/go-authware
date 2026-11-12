@@ -246,4 +246,7 @@ services. It defends against:
   (`FuzzSigV4SignHost`, `FuzzSigningHost`, `FuzzCanonicalHeaders`,
   `FuzzCanonicalQuery`, `FuzzAppendQueryComponent`, `FuzzAWSEncodePath`),
   secrets files (`FuzzDecodeFile`), replay signing and verification
-  (`FuzzAppendHost`, `FuzzAppendRequestURI`, `FuzzVerifierVerify`).
+  (`FuzzAppendHost`, `FuzzAppendRequestURI`, `FuzzVerifierVerify`), and the
+  JSON documents and errors written, read back by strict readers
+  (`FuzzFacadeServeRegister`, `FuzzFacadeServeMetadata`,
+  `FuzzGateResourceMetadata`, `FuzzWriteError`).

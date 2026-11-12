@@ -1,6 +1,7 @@
 package authware
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -155,4 +156,49 @@ func referenceRedirectURIs(body string) ([]string, error) {
 		return nil, errRedirectURIs
 	}
 	return uris, nil
+}
+
+// FuzzFacadeServeRegister checks that a strict reader reads back every answer: the
+// client with the redirect URIs of the reference for a body it accepts, and else the
+// error of the refusal.
+func FuzzFacadeServeRegister(f *testing.F) {
+	for _, c := range claudeClients() {
+		f.Add([]byte(c.registration))
+	}
+	f.Add([]byte(urisOpen + `"https://a.example/c\u00e9?q=\"<>&\u2028","http://[::1]:1/\ud83d\ude00"]}`))
+	f.Add([]byte(urisOpen + `"https://a.example/cb"],"x":` + "\xff}"))
+	f.Add([]byte(urisOpen + `]}`))
+	f.Add([]byte(`{`))
+	f.Fuzz(func(t *testing.T, body []byte) {
+		fac := testFacade(t, facadeConfig(newFakeIDP(t)))
+		w := serve(http.HandlerFunc(fac.serveRegister), newReq(t, http.MethodPost, pathRegister, bytes.NewReader(body)))
+		status, want := referenceRegistration(body)
+		if got := readBack(t, w.Body.Bytes()); w.Code != status || !slices.Equal(got, want) {
+			t.Fatalf("register(%q) = %d %s, read back as %q, want %d %q", body, w.Code, w.Body, got, status, want)
+		}
+	})
+}
+
+// referenceRegistration returns the status and the tokens of the answer to the
+// registration body: the client with the redirect URIs of referenceRedirectURIs, or
+// the error of a body too large, of no strict object or of invalid redirect URIs.
+func referenceRegistration(body []byte) (status int, answer []json.Token) {
+	uris, err := referenceRedirectURIs(string(body))
+	refusal := func(code, description string) (int, []json.Token) {
+		return http.StatusBadRequest, object(
+			textMember(oauthwire.ParamError, code), textMember(oauthwire.ParamErrorDescription, description))
+	}
+	switch {
+	case len(body) > maxFacadeBodyBytes:
+		return refusal(codeInvalidClientMetadata, descUnreadableBody)
+	case errors.Is(err, errRedirectURIs):
+		return refusal(codeInvalidRedirectURI, descInvalidRedirectURIs)
+	case err != nil:
+		return refusal(codeInvalidClientMetadata, "client metadata must be a JSON object")
+	}
+	return http.StatusCreated, object(
+		textMember(oauthwire.ParamClientID, testFacadeClient),
+		textMember("token_endpoint_auth_method", authMethodNone),
+		arrayMember("grant_types", grantAuthorizationCode, oauthwire.GrantRefreshToken),
+		arrayMember("response_types", responseTypeCode), arrayMember("redirect_uris", uris...))
 }

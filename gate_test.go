@@ -37,6 +37,10 @@ const (
 // testBearerMethod is the documented bearer token transport.
 const testBearerMethod = "header"
 
+// describedAt is where the segment after the metadata prefix lies among those a
+// rooted path splits into.
+const describedAt = 3
+
 // oauthToken signs a token of testUser accepted by validOAuth, granting scope.
 func oauthToken(tb testing.TB, scope string) string {
 	tb.Helper()
@@ -1098,4 +1102,35 @@ func referenceOriginalPath(target string) string {
 		return ""
 	}
 	return u.EscapedPath()
+}
+
+// FuzzGateResourceMetadata checks that a strict reader reads back the document of
+// any request host and path: the resource they name, as written, the issuer, the
+// scopes and the bearer method.
+func FuzzGateResourceMetadata(f *testing.F) {
+	for _, seed := range [][2]string{
+		{"api.example", ".well-known/oauth-protected-resource/mcp"}, {"", ""}, {`a"b\c`, "x/y/\u00e9\"\\"},
+		{"h\xff", "x/y/z\xff"}, {"\u2028<&>", "x/y/"}, {"x\x00y\x7f", "a/b/c/d?e#f"},
+		{`\ud800`, "%2F/%zz/\xed\xa0\x80"},
+	} {
+		f.Add(seed[0], seed[1])
+	}
+	h := mustGate(f, validOAuth()).resourceMetadata(testEndpoint, []string{testRead})
+	f.Fuzz(func(t *testing.T, host, path string) {
+		r := newReq(t, http.MethodGet, pathResourceMetadata, http.NoBody)
+		r.Host, r.URL = host, &url.URL{Path: pathRoot + path}
+		w := serve(h, r)
+		described := testEndpoint
+		if segments := strings.SplitN(r.URL.EscapedPath(), pathRoot, describedAt+1); len(segments) > describedAt {
+			described = pathRoot + segments[describedAt]
+		}
+		want := object(
+			textMember(memberResource, "http://"+host+described),
+			arrayMember("authorization_servers", testIssuerURL), arrayMember("scopes_supported", testRead),
+			arrayMember("bearer_methods_supported", testBearerMethod))
+		if got := readBack(t, w.Body.Bytes()); w.Code != http.StatusOK || !slices.Equal(got, want) {
+			t.Fatalf("metadata of host %q, path %q = %d %s, read back as %q, want 200 %q", host, pathRoot+path,
+				w.Code, w.Body, got, want)
+		}
+	})
 }
