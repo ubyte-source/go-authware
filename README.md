@@ -676,8 +676,8 @@ with Go 1.27.3 on linux/amd64, an Intel Xeon Gold 6442Y pinned to 11 cores with
 GOMAXPROCS 11 on a shared host. Tokens carry `"typ":"JWT"`, and cached tokens
 expire.
 
-| Package    | Benchmark                                        |   ns/op |  B/op | allocs/op |
-|------------|--------------------------------------------------|--------:|------:|----------:|
+| Package    | Benchmark                                        | Time [ns/op] | Allocated [B/op] | Allocations [allocs/op] |
+|------------|--------------------------------------------------|-------------:|-----------------:|------------------------:|
 | root       | `StaticAuthenticator` shared token (43 bytes)    |     154 |     0 |         0 |
 | root       | `StaticAuthenticator` shared key (64 bytes)      |     147 |     0 |         0 |
 | root       | `MTLSAuthenticator` common name                  |      40 |    80 |         1 |
