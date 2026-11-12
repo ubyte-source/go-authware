@@ -145,6 +145,7 @@ func TestParseJWKRejects(t *testing.T) {
 		{"P-256 ES384", withMembers(ecJWK, map[string]any{memberAlg: algES384})},
 		{"wrong curve", withMembers(ecJWK, map[string]any{memberCrv: crvP384})},
 		{"secp256k1", withMembers(ecJWK, map[string]any{memberCrv: "secp256k1"})},
+		{"P-224", publicJWK(t, mustECKey(t, elliptic.P224()), nil)},
 		{"coordinates split unevenly", withMembers(ecJWK, map[string]any{memberX: uneven[0], "y": uneven[1]})},
 		{"x padded", withMembers(ecJWK, map[string]any{memberX: stringMember(ecJWK, memberX) + "="})},
 		{"y padded", withMembers(ecJWK, map[string]any{memberY: stringMember(ecJWK, memberY) + "="})},

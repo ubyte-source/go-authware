@@ -69,7 +69,10 @@ func limitProbes() map[string][]string {
 		"Time claims":                     {".:TestNumericDate"},
 		"RSA modulus":                     {".:TestParseJWK", ".:TestParseJWKRejects"},
 		"RSA exponent":                    {".:TestParseJWK", ".:TestParseJWKNamesTheFault"},
-		"EC curves":                       {".:TestParseJWKKeys", ".:TestParseJWKRejects", ".:TestParseECKeyRejects"},
+		"EC curves": {
+			".:TestParseJWK", ".:TestParseJWKKeys", ".:TestOAuthAuthenticatorValidateToken", ".:TestParseJWKRejects",
+			".:TestParseECKeyRejects",
+		},
 	}
 	maps.Copy(probes, answerProbes())
 	maps.Copy(probes, secretProbes())
@@ -118,18 +121,20 @@ func secretProbes() map[string][]string {
 func timeProbes() map[string][]string {
 	return map[string][]string{
 		"Token lifetime": {
-			"internal/oauthwire:TestParseExpiresIn", "cred:TestParseEpochCap", "cred:TestParseMSIResponseFarExpiresOn",
+			"internal/oauthwire:TestParseExpiresIn", "cred:TestParseEpoch", "cred:TestParseEpochCap",
+			"cred:TestParseMSIResponseFarExpiresOn",
 		},
 		"Clock skew (`ClockSkew`)":       {".:TestDefaultClockSkew", ".:TestConfigApplyDefaults"},
 		"Key cache TTL (`KeysCacheTTL`)": {".:TestConfigApplyDefaults", ".:TestCacheGetStale"},
 		"Fetch timeout (`FetchTimeout`, `Timeout` of each `cred` source)": {
-			".:TestConfigApplyDefaults", "cred:TestDefaultTimeout", "cred:TestNewCachedSourceDefaults",
+			".:TestConfigApplyDefaults", "cred:TestDefaultTimeout", "cred:TestNewRefreshToken",
+			"cred:TestNewCachedSourceDefaults",
 		},
 		"Stale keys and issuer metadata served while fetches fail": {".:TestStale", ".:TestCacheGetStale"},
 		"Backoff after a failed key or metadata fetch, or `cred.CachedSource` refresh": {
 			"internal/retry:TestBackoffWaiting", ".:TestCacheGetStale", "cred:TestCachedSourceTokenBackoff",
 		},
-		"Forced key refresh interval": {".:TestOAuthAuthenticatorValidateTokenRenewsKeys"},
+		"Forced key refresh interval": {".:TestOAuthAuthenticatorValidateTokenRenewsKeys", ".:TestKeySourceKey"},
 		"`replay` window": {
 			"replay:TestWithWindow", "replay:TestNewVerifierConfigRejects", "replay:TestNewVerifierConfigDefaults",
 			"replay:TestVerifierVerifyWindow",
