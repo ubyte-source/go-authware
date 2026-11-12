@@ -202,7 +202,7 @@ services. It defends against:
   statement coverage) and `make bench-smoke` (100 iterations of every
   benchmark) on Go 1.25.14 and Go 1.27.4 (`test.yml`); `make vet`
   (`lint.yml`).
-- `golangci-lint` v2.14.0, built with Go 1.27.4 (`lint.yml`, `make lint`),
+- `golangci-lint` v2.15.0, built with Go 1.27.4 (`lint.yml`, `make lint`),
   with the repository `.golangci.yml`: every linter of its enable list and the
   `gofmt` and `goimports` formatters, `gosec` included, test files linted. The
   `depguard` rule `production` denies `encoding/json` and `unsafe` to the
@@ -216,13 +216,13 @@ services. It defends against:
   errors of the internal packages, which wrap them with their context or in
   the sentinel the caller passes, and those a decorator forwards from its
   delegate. Every `nolint` directive names its linter and gives a reason.
-- `deadcode -test` v0.50.0 (`lint.yml`, `make deadcode`): no function that
+- `deadcode -test` v0.52.0 (`lint.yml`, `make deadcode`): no function that
   neither a test nor an entry point reaches.
 - Every action is pinned by commit with its version, and every workflow has
   top-level permissions no wider than `contents: read` (CodeQL's in
   `security.yml`), no `pull_request_target` trigger and checkouts without
   persisted credentials.
-- `govulncheck` v1.8.0 and CodeQL with the `security-and-quality` suite
+- `govulncheck` v1.9.0 and CodeQL with the `security-and-quality` suite
   (`security.yml`).
 - Native fuzzing (`fuzz.yml`, weekly, and `make fuzz`) over every `Fuzz`
   function in the module, listed by `make fuzz-list`: token parsing

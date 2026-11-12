@@ -327,11 +327,14 @@ func joinLines(lines ...string) []byte {
 	return b
 }
 
+// signedBreaks counts the line breaks of a string to sign.
+const signedBreaks = 3
+
 // stringToSign returns the string that the signing key signs for a canonical
 // request of amzDate in scope, with room after it for its MAC.
 func stringToSign(amzDate, scope string, canonical []byte) []byte {
 	sum := sha256.Sum256(canonical)
-	b := make([]byte, 0, len(awsAlgorithm)+len(amzDate)+len(scope)+3+hex.EncodedLen(len(sum))+sha256.Size)
+	b := make([]byte, 0, len(awsAlgorithm)+len(amzDate)+len(scope)+signedBreaks+hex.EncodedLen(len(sum))+sha256.Size)
 	b = append(b, awsAlgorithm+"\n"...)
 	b = append(b, amzDate...)
 	b = append(b, '\n')
@@ -629,11 +632,11 @@ func appendAWSEncoded(dst []byte, s string) []byte {
 // appendAWSByte appends c to dst, percent-encoded in upper-case hex unless it
 // is one of A-Z a-z 0-9 - _ . ~.
 func appendAWSByte(dst []byte, c byte) []byte {
-	const hexDigits = "0123456789ABCDEF"
+	const hexDigits, nibbleBits, lowNibble = "0123456789ABCDEF", 4, 0x0F
 	if syntax.IsUnreserved(c) {
 		return append(dst, c)
 	}
-	return append(dst, '%', hexDigits[c>>4], hexDigits[c&0x0F])
+	return append(dst, '%', hexDigits[c>>nibbleBits], hexDigits[c&lowNibble])
 }
 
 func hmacSHA256(key, data []byte) [sha256.Size]byte {

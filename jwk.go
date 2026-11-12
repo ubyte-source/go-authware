@@ -30,6 +30,9 @@ const (
 	opVerify     = "verify"
 )
 
+// uncompressedPoint starts the encoding of an EC point given by both coordinates.
+const uncompressedPoint = 4
+
 // RSA key bounds in bits: the modulus, and the odd exponent from 3 to 2^31-1.
 const (
 	minRSABits         = 2048
@@ -322,7 +325,7 @@ func parseECKey(crv, x, y string) (verificationKey, error) {
 	if len(xb) != len(yb) {
 		return nil, fmt.Errorf("%w: EC coordinates of %d and %d bytes", errUnusableKey, len(xb), len(yb))
 	}
-	pub, err := ecdsa.ParseUncompressedPublicKey(curve, append(append([]byte{4}, xb...), yb...))
+	pub, err := ecdsa.ParseUncompressedPublicKey(curve, append(append([]byte{uncompressedPoint}, xb...), yb...))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errUnusableKey, err)
 	}

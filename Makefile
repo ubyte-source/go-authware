@@ -1,13 +1,13 @@
 GO            ?= go
-GOLANGCI_LINT ?= GOTOOLCHAIN=go1.27.4 $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
-GOVULNCHECK   ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
-DEADCODE      ?= $(GO) run golang.org/x/tools/cmd/deadcode@v0.50.0
+GOLANGCI_LINT ?= GOTOOLCHAIN=go1.27.4 $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+GOVULNCHECK   ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.9.0
+DEADCODE      ?= $(GO) run golang.org/x/tools/cmd/deadcode@v0.52.0
 FUZZTIME      ?= 30s
 FUZZ_TARGETS  ?=
 # FUZZ_GO runs the fuzzer of Go 1.27, which ends a FUZZTIME run without a
 # spurious "context deadline exceeded" failure (go.dev/issue/75804).
 FUZZ_GO       ?= GOTOOLCHAIN=go1.27.4 $(GO)
-NILAWAY       ?= $(GO) run go.uber.org/nilaway/cmd/nilaway@v0.0.0-20260918162853-acb8859b9031
+NILAWAY       ?= $(GO) run go.uber.org/nilaway/cmd/nilaway@v0.0.0-20261112030514-ccd005690d1e
 TESTTIME_MAX  ?= 10
 RACECOUNT     ?= 10
 FINAL_FUZZTIME ?= 60s

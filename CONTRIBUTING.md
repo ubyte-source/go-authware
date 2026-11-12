@@ -6,7 +6,7 @@
 - make, and jq for `make testtime`
 
 The Makefile runs every tool at a pinned version through `go run`:
-golangci-lint v2.14.0, govulncheck v1.8.0, deadcode v0.50.0 and nilaway.
+golangci-lint v2.15.0, govulncheck v1.9.0, deadcode v0.52.0 and nilaway.
 Nothing needs a global install; `GOLANGCI_LINT=<path>`, `GOVULNCHECK=<path>`,
 `DEADCODE=<path>` and `NILAWAY=<path>` point the targets at local binaries of
 the same versions. golangci-lint builds and runs with Go 1.27.4
@@ -37,9 +37,9 @@ CodeQL.
 |---------------|------|
 | `modcheck`    | `go mod download`, `go mod verify` and `go mod tidy -diff` |
 | `vet`         | `go vet ./...` |
-| `lint`        | golangci-lint v2.14.0 with `.golangci.yml` (gosec runs inside it) |
-| `vuln`        | govulncheck v1.8.0 on the module and the toolchain |
-| `deadcode`    | deadcode v0.50.0 `-test ./...`; any output fails |
+| `lint`        | golangci-lint v2.15.0 with `.golangci.yml` (gosec runs inside it) |
+| `vuln`        | govulncheck v1.9.0 on the module and the toolchain |
+| `deadcode`    | deadcode v0.52.0 `-test ./...`; any output fails |
 | `test`        | the tests with `-shuffle=on`, without the race detector |
 | `race`        | the tests with `-race`, `-shuffle=on` and `CGO_ENABLED=1`, writing `coverage.out` |
 | `bench-smoke` | every benchmark 100 times, `-benchtime=100x` |

@@ -26,6 +26,15 @@ const (
 // bearerMethodHeader is the only bearer token transport accepted.
 const bearerMethodHeader = "header"
 
+// The values of a check answer's headers, by their place in the array they share.
+const (
+	checkCache = iota
+	checkSubject
+	checkMethod
+	checkScopes
+	checkValues
+)
+
 // headerOriginalURI carries the request target of an nginx auth_request
 // subrequest.
 const headerOriginalURI = "X-Original-Uri"
@@ -142,19 +151,20 @@ func (g *Gate) Require(checks ...Capability) func(http.Handler) http.Handler {
 func (g *Gate) CheckHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The answer headers share one array; each slice is capped at its value.
-		vals := [4]string{oauthwire.CacheNoStore}
+		vals := [checkValues]string{checkCache: oauthwire.CacheNoStore}
 		h := w.Header()
-		h["Cache-Control"] = vals[:1:1]
+		h["Cache-Control"] = vals[checkCache:checkSubject:checkSubject]
 		id, e := g.auth.authenticate(r)
 		if e != nil {
 			g.denyAt(w, r, e, originalPath)
 			return
 		}
-		vals[1], vals[2] = sanitizeHeaderValue(id.subject), string(id.mode)
-		h["X-Auth-Subject"], h["X-Auth-Method"] = vals[1:2:2], vals[2:3:3]
+		vals[checkSubject], vals[checkMethod] = sanitizeHeaderValue(id.subject), string(id.mode)
+		h["X-Auth-Subject"] = vals[checkSubject:checkMethod:checkMethod]
+		h["X-Auth-Method"] = vals[checkMethod:checkScopes:checkScopes]
 		if len(id.scopes) > 0 {
-			vals[3] = sanitizeHeaderValue(strings.Join(id.scopes, " "))
-			h["X-Auth-Scopes"] = vals[3:4:4]
+			vals[checkScopes] = sanitizeHeaderValue(strings.Join(id.scopes, " "))
+			h["X-Auth-Scopes"] = vals[checkScopes:checkValues:checkValues]
 		}
 		w.WriteHeader(http.StatusOK)
 	})
