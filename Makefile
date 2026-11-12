@@ -5,7 +5,7 @@ DEADCODE      ?= $(GO) run golang.org/x/tools/cmd/deadcode@v0.52.0
 FUZZTIME      ?= 30s
 FUZZ_TARGETS  ?=
 # FUZZ_GO runs the fuzzer of Go 1.27, which ends a FUZZTIME run without a
-# spurious "context deadline exceeded" failure (go.dev/issue/75804).
+# spurious "context deadline exceeded" failure.
 FUZZ_GO       ?= GOTOOLCHAIN=go1.27.4 $(GO)
 NILAWAY       ?= $(GO) run go.uber.org/nilaway/cmd/nilaway@v0.0.0-20261112030514-ccd005690d1e
 TESTTIME_MAX  ?= 10
