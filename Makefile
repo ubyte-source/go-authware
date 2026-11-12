@@ -88,7 +88,7 @@ race-repeat: ## Run the tests RACECOUNT times with the race detector
 fuzz-final: ## Run every fuzz target for FINAL_FUZZTIME
 	$(MAKE) fuzz FUZZTIME=$(FINAL_FUZZTIME)
 
-treecheck: clean ## Fail on an artefact, an untracked non-source file, an empty directory or a non-LF file
+treecheck: clean ## Fail on an artefact, an untracked non-source file, a fuzz corpus file, an empty directory or a non-LF file
 	@out=$$(git status --porcelain=v1 --ignored --untracked-files=all | sed -n 's/^\(??\|!!\) //p' | \
 		awk -v cmds="$$(ls cmd 2>/dev/null)" 'BEGIN { n = split(cmds, c, " "); for (i = 1; i <= n; i++) cmd[c[i]] = 1 }; \
 		{ n = split($$0, p, "/"); b = p[n] }; \
@@ -96,7 +96,7 @@ treecheck: clean ## Fail on an artefact, an untracked non-source file, an empty 
 		$$0 == ".env" || $$0 ~ /^\.(idea|vscode)\// || $$0 ~ /(^|\/)testdata\// { next }; \
 		b ~ /\.(go|md|yml|yaml|json)$$/ { next }; \
 		b ~ /^(go\.mod|go\.sum|LICENSE|Makefile|Dockerfile|\.gitignore|\.gitattributes|\.dockerignore)$$/ { next }; \
-		b ~ /^(\.env\.example|default\.pgo)$$/ { next }; { print }') && [ -z "$$out" ] || \
+		b ~ /^\.env\.example$$/ { next }; { print }') && [ -z "$$out" ] || \
 		{ echo "treecheck: artefacts or untracked files of no source kind:"; echo "$$out"; exit 1; }
 	@out=$$(find . -path ./.git -prune -o -type d -empty -print) && [ -z "$$out" ] || \
 		{ echo "treecheck: empty directories:"; echo "$$out"; exit 1; }
@@ -104,6 +104,8 @@ treecheck: clean ## Fail on an artefact, an untracked non-source file, an empty 
 		($$1 !~ /^i\/(lf|-text|none)?$$/ || $$2 !~ /^w\/(lf|-text|none)$$/)') && [ -z "$$out" ] || \
 		{ echo "treecheck: files not stored with LF (git add --renormalize . fixes the index):"; echo "$$out"; exit 1; }
 	@grep -qx '\* text=auto eol=lf' .gitattributes || { echo "treecheck: .gitattributes lacks * text=auto eol=lf"; exit 1; }
+	@out=$$(find . -path ./.git -prune -o -path '*/testdata/fuzz/*' -type f -print) && [ -z "$$out" ] || \
+		{ echo "treecheck: files of the fuzzing engine under testdata/fuzz (a crasher is an f.Add seed):"; echo "$$out"; exit 1; }
 
 fuzz: ## Run every fuzz target, or the pkg:Target list FUZZ_TARGETS, for FUZZTIME each
 	@targets='$(FUZZ_TARGETS)'; [ -n "$$targets" ] || targets=$$($(FUZZ_LIST)) || exit 1; \
