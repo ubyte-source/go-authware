@@ -833,13 +833,20 @@ github.com/ubyte-source/go-jsonfast v0.4.1
 No `golang.org/x/oauth2`, no cloud SDKs: every protocol is implemented
 against the standard library, with JSON through go-jsonfast.
 
-## License
+## Versioning
 
-MIT, see [LICENSE](LICENSE).
+We use [SemVer](https://semver.org/). Releases are tracked in the repository
+[tags](https://github.com/ubyte-source/go-authware/tags).
 
 ## Authors
 
-- **Paolo Fabris**, [ubyte.it](https://ubyte.it/)
+- **Paolo Fabris** — [ubyte.it](https://ubyte.it/)
+
+See also the list of [contributors](https://github.com/ubyte-source/go-authware/contributors).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
 
 ## Support
 
