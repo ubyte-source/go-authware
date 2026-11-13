@@ -445,50 +445,50 @@ func signers(t *testing.T) map[string]Signer {
 	return map[string]Signer{"plain": AsSigner(&sequence{}), "renewing": AsSigner(c)}
 }
 
-// redirected builds the request to the last of urls, reached through a
-// redirect from each URL before it.
-func redirected(tb testing.TB, urls ...string) *http.Request {
-	tb.Helper()
-	var r *http.Request
-	for _, u := range urls {
-		next := newReq(tb, http.MethodGet, u, http.NoBody)
-		if r != nil {
-			next.Response = &http.Response{Body: http.NoBody, Request: r}
-		}
-		r = next
+// failingCloser is an empty body that fails to close.
+type failingCloser struct{}
+
+func (failingCloser) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (failingCloser) Close() error { return errStore }
+
+// refusedHop sends through transport a request that follows a redirect and carries
+// body, requires no answer and returns the error.
+func refusedHop(t *testing.T, transport http.RoundTripper, body io.ReadCloser) error {
+	t.Helper()
+	hop := newReq(t, http.MethodPost, testAPIURL, body)
+	hop.Response = &http.Response{Body: http.NoBody}
+	resp, err := transport.RoundTrip(hop)
+	if resp != nil {
+		closeResponse(t, resp)
+		t.Errorf("RoundTrip of a redirect answers %d, want no answer", resp.StatusCode)
 	}
-	return r
+	return err
 }
 
-func TestNewTransportRedirect(t *testing.T) {
-	const api, other = "https://api.example/b", "https://other.example/"
-	unknown := newReq(t, http.MethodGet, api, http.NoBody)
-	unknown.Response = &http.Response{Body: http.NoBody}
-	for _, tt := range []struct {
-		name string
-		req  *http.Request
-		want string
-	}{
-		{"first hop", redirected(t, api), bearerSeq1},
-		{"same origin", redirected(t, "https://API.example/a", api), bearerSeq1},
-		{"same origin twice", redirected(t, "https://api.example/a", "https://api.example:443/c", api), bearerSeq1},
-		{"other host", redirected(t, other, api), ""},
-		{"other port", redirected(t, "https://api.example:8443/", api), ""},
-		{"other scheme", redirected(t, "http://api.example/", api), ""},
-		{"back to the origin", redirected(t, "https://api.example/a", other, api), ""},
-		{"within another origin", redirected(t, api, other, other+"c"), ""},
-		{"unknown origin", unknown, ""},
-	} {
-		for kind, signer := range signers(t) {
-			rec := &recorder{}
-			resp, err := NewTransport(rec, signer).RoundTrip(tt.req)
-			if err != nil {
-				t.Fatalf("%s %s: RoundTrip = %v, want a response", kind, tt.name, err)
-			}
-			closeResponse(t, resp)
-			if fmt.Sprint(rec.auth) != "["+tt.want+"]" {
-				t.Errorf("%s %s: sent Authorization %q, want [%s]", kind, tt.name, rec.auth, tt.want)
-			}
+// TestNewTransportRefusesRedirect requires a request that follows a redirect to be
+// refused before a token is taken: its body is closed, a failed close joins the
+// error, and nothing reaches the base transport.
+func TestNewTransportRefusesRedirect(t *testing.T) {
+	plain := &sequence{}
+	cached, renewed := cachedSequence(t)
+	for kind, tc := range map[string]struct {
+		signer Signer
+		source *sequence
+	}{"plain": {AsSigner(plain), plain}, "renewing": {AsSigner(cached), renewed}} {
+		rec := &recorder{}
+		transport := NewTransport(rec, tc.signer)
+		body := &closeTracker{Reader: strings.NewReader(testPayload)}
+		if err := refusedHop(t, transport, body); !errors.Is(err, ErrRedirect) || errors.Is(err, ErrCredential) ||
+			!body.closed.Load() {
+			t.Errorf("%s: RoundTrip of a redirect = %v, body closed %v; want ErrRedirect alone and a closed body",
+				kind, err, body.closed.Load())
+		}
+		if err := refusedHop(t, transport, failingCloser{}); !errors.Is(err, ErrRedirect) || !errors.Is(err, errStore) {
+			t.Errorf("%s: RoundTrip of a redirect whose body fails to close = %v, want both errors", kind, err)
+		}
+		if sent, taken := len(rec.auth), tc.source.calls.Load(); sent != 0 || taken != 0 {
+			t.Errorf("%s: %d requests sent and %d tokens taken for refused redirects, want none", kind, sent, taken)
 		}
 	}
 }
@@ -506,49 +506,48 @@ func TestNewTransportBaseError(t *testing.T) {
 	}
 }
 
+// post sends testPayload to target through client and returns the status of the
+// answer, 0 without one, and the error.
+func post(t *testing.T, client *http.Client, target string) (int, error) {
+	t.Helper()
+	resp, err := client.Do(newReq(t, http.MethodPost, target, strings.NewReader(testPayload)))
+	if err != nil {
+		return 0, fmt.Errorf("post: %w", err)
+	}
+	closeResponse(t, resp)
+	return resp.StatusCode, nil
+}
+
+// TestNewTransportRedirectClient posts a body through a client that follows redirects,
+// which gets ErrRedirect, and through one that follows none, which gets the redirect:
+// no request reaches the redirect's target, on the origin or on another.
 func TestNewTransportRedirectClient(t *testing.T) {
-	var seen atomic.Pointer[string]
-	var routes atomic.Pointer[map[string]string]
+	var reached atomic.Int32
+	var target atomic.Pointer[string]
 	hop := func(w http.ResponseWriter, r *http.Request) {
-		if to, ok := (*routes.Load())[r.Host+r.URL.Path]; ok {
-			http.Redirect(w, r, to, http.StatusFound)
+		if r.URL.Path == "/end" {
+			reached.Add(1)
 			return
 		}
-		auth := r.Header.Get(authorization)
-		seen.Store(&auth)
-		w.WriteHeader(http.StatusNoContent)
+		http.Redirect(w, r, *target.Load(), http.StatusTemporaryRedirect)
 	}
 	a, b := serve(t, hop), serve(t, hop)
-	hostA, hostB := strings.TrimPrefix(a.URL, "http://"), strings.TrimPrefix(b.URL, "http://")
-	routes.Store(&map[string]string{
-		hostA + "/in": "/end", hostA + "/to-b": b.URL + "/end", hostA + "/via-b": b.URL + "/hop",
-		hostB + "/hop": "/end", hostA + "/back-a": b.URL + "/back", hostB + "/back": a.URL + "/end",
-	})
-	for _, tt := range []struct {
-		name      string
-		rawTarget string
-		signed    bool
-	}{
-		{"within the origin", a.URL + "/in", true},
-		{"to another origin", a.URL + "/to-b", false},
-		{"within another origin", a.URL + "/via-b", false},
-		{"back to the origin", a.URL + "/back-a", false},
-	} {
+	for name, to := range map[string]string{"within the origin": "/end", "to another origin": b.URL + "/end"} {
+		target.Store(&to)
 		for kind, signer := range signers(t) {
-			seen.Store(nil)
 			client := &http.Client{Transport: NewTransport(nil, signer)}
-			resp, err := client.Do(newReq(t, http.MethodGet, tt.rawTarget, http.NoBody))
-			if err != nil {
-				t.Fatalf("%s %s: Do = %v, want a response", kind, tt.name, err)
+			if status, err := post(t, client, a.URL); status != 0 || !errors.Is(err, ErrRedirect) {
+				t.Errorf("%s %s: Do = status %d, %v, want ErrRedirect and no answer", kind, name, status, err)
 			}
-			closeResponse(t, resp)
-			switch got := seen.Load(); {
-			case got == nil:
-				t.Errorf("%s %s: no request reached the last hop, want one", kind, tt.name)
-			case (*got != "") != tt.signed:
-				t.Errorf("%s %s: last hop saw Authorization %q, want signed %v", kind, tt.name, *got, tt.signed)
+			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+			if status, err := post(t, client, a.URL); status != http.StatusTemporaryRedirect || err != nil {
+				t.Errorf("%s %s: Do of a client that follows no redirect = status %d, %v, want %d",
+					kind, name, status, err, http.StatusTemporaryRedirect)
 			}
 		}
+	}
+	if n := reached.Load(); n != 0 {
+		t.Errorf("%d requests reached the target of a redirect, want none", n)
 	}
 }
 
@@ -690,24 +689,19 @@ func TestNewTransportSignerConsumesBody(t *testing.T) {
 	}
 }
 
-// failingCloser is an empty body that fails to close.
-type failingCloser struct{}
-
-func (failingCloser) Read([]byte) (int, error) { return 0, io.EOF }
-
-func (failingCloser) Close() error { return errStore }
-
 func TestUnsent(t *testing.T) {
-	if err := unsent(errSource, nil); !errors.Is(err, ErrCredential) || !errors.Is(err, errSource) {
-		t.Fatalf("unsent without a body = %v, want ErrCredential wrapping errSource", err)
+	for _, body := range []io.ReadCloser{nil, http.NoBody} {
+		if err := unsent(errSource, body); !errors.Is(err, errSource) || strings.Contains(err.Error(), newline) {
+			t.Fatalf("unsent without a body = %v, want errSource alone", err)
+		}
 	}
 	body := &closeTracker{Reader: strings.NewReader(fillByte)}
-	if err := unsent(errSource, body); !body.closed.Load() || !errors.Is(err, ErrCredential) ||
-		!errors.Is(err, errSource) || strings.Contains(err.Error(), newline) {
-		t.Fatalf("unsent = %v, closed %v, want the credential error alone and a closed body", err, body.closed.Load())
+	if err := unsent(errSource, body); !body.closed.Load() || !errors.Is(err, errSource) ||
+		strings.Contains(err.Error(), newline) {
+		t.Fatalf("unsent = %v, closed %v, want errSource alone and a closed body", err, body.closed.Load())
 	}
 	err := unsent(errSource, failingCloser{})
-	if !errors.Is(err, ErrCredential) || !errors.Is(err, errSource) || !errors.Is(err, errStore) {
+	if !errors.Is(err, errSource) || !errors.Is(err, errStore) {
 		t.Fatalf("unsent with a failed close = %v, want both errors", err)
 	}
 }

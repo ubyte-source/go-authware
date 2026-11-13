@@ -33,7 +33,7 @@ services. It defends against:
   key type mismatch) and key injection through JOSE headers.
 - Hostile or compromised discovery documents steering fetches or
   credentials elsewhere (off-origin endpoints, redirects, userinfo URLs).
-- Outbound credentials following a redirect to another origin.
+- An outbound credential or body following a redirect.
 - Configurations that silently disable or never match a check.
 - Plaintext transport of signing material and client credentials.
 - Timing side channels in secret comparison.
@@ -54,9 +54,9 @@ services. It defends against:
   configured one that refuses redirects, so the checked URL is the one
   contacted. Error texts never echo a URL with its userinfo.
   `CheckOutboundURL` applies the same policy to a service's own URLs.
-- **Outbound signing.** `cred.NewTransport` signs a request only while every
-  hop of its redirect chain stayed on the origin of the first one; a chain
-  that left it goes unsigned, also after it comes back.
+- **Outbound signing.** `cred.NewTransport` sends no request that follows a
+  redirect: the client that follows one gets `cred.ErrRedirect`, so neither the
+  credential nor the body reaches the redirect's target.
 - **Fail-closed configuration.** `New` refuses a setting in the section of a
   mode other than the selected one, a bearer token or API key that cannot
   travel in a header, a `PublicURL` that is not a canonical origin (lower

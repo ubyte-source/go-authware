@@ -24,6 +24,9 @@ var (
 	// ErrCredential wraps every error that stops AsSigner or NewTransport
 	// from attaching a credential.
 	ErrCredential = errors.New(errPrefix + "credential unavailable")
+	// ErrRedirect reports a request that follows a redirect, which NewTransport
+	// refuses to send.
+	ErrRedirect = errors.New(errPrefix + "redirect refused")
 	// ErrInvalidConfig reports a constructor argument that cannot work.
 	ErrInvalidConfig = errors.New(errPrefix + "invalid config")
 

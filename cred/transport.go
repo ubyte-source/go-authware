@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-
-	"github.com/ubyte-source/go-authware/v2/internal/netguard"
 )
 
 // Invalidator drops a token that the server rejected. Implementations must be
@@ -22,22 +20,24 @@ type invalidatingSource interface {
 	Invalidator
 }
 
-// signedTransport signs every same-origin request with signer.
+// signedTransport signs every request with signer and sends none that follows a
+// redirect.
 type signedTransport struct {
 	base   http.RoundTripper
 	signer Signer
 }
 
 // renewingTransport signs with the tokens of renewer, drops a token answered
-// with 401 and then retries a replayable request once.
+// with 401 and then retries a replayable request once; it sends no request that
+// follows a redirect.
 type renewingTransport struct {
 	base    http.RoundTripper
 	renewer invalidatingSource
 }
 
-// NewTransport signs a clone of each request through base or http.DefaultTransport
-// with s, not nil, or with a copy of s when it is a *Token; a redirect chain that
-// left its origin goes unsigned. AsSigner over an Invalidator adds the 401 renewal.
+// NewTransport signs a clone of each request through base or http.DefaultTransport with
+// s, not nil, or with a copy of s when it is a *Token, and refuses with ErrRedirect a
+// request that follows a redirect. AsSigner over an Invalidator adds the 401 renewal.
 func NewTransport(base http.RoundTripper, s Signer) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport
@@ -53,21 +53,21 @@ func NewTransport(base http.RoundTripper, s Signer) http.RoundTripper {
 	return &signedTransport{base: base, signer: s}
 }
 
-// RoundTrip sends a clone of r signed by the signer, or r itself once its
-// redirect chain has left the origin.
+// RoundTrip sends a clone of r signed by the signer, or refuses r with ErrRedirect
+// when it follows a redirect.
 func (t *signedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if crossOrigin(r) {
-		return t.base.RoundTrip(r)
+	if r.Response != nil {
+		return nil, unsent(ErrRedirect, r.Body)
 	}
 	return sendSigned(t.base, r, r.Body, t.signer)
 }
 
-// RoundTrip sends a clone of r with a token of the source, or r itself once
-// its redirect chain has left the origin. A 401 invalidates the token; a
+// RoundTrip sends a clone of r with a token of the source, or refuses r with
+// ErrRedirect when it follows a redirect. A 401 invalidates the token; a
 // replayable request is then sent once more when the source yields another.
 func (t *renewingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if crossOrigin(r) {
-		return t.base.RoundTrip(r)
+	if r.Response != nil {
+		return nil, unsent(ErrRedirect, r.Body)
 	}
 	resp, tok, err := t.send(r)
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {
@@ -94,7 +94,7 @@ func (t *renewingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 func (t *renewingTransport) send(r *http.Request) (*http.Response, *Token, error) {
 	tok, err := fetchToken(r.Context(), t.renewer)
 	if err != nil {
-		return nil, nil, unsent(err, r.Body)
+		return nil, nil, unsent(credentialError(err), r.Body)
 	}
 	resp, err := sendSigned(t.base, r, r.Body, tok)
 	if err != nil {
@@ -119,15 +119,14 @@ func sendSigned(base http.RoundTripper, r *http.Request, body io.ReadCloser, s S
 	clone := r.Clone(ctx)
 	clone.Body = body
 	if err := s.Sign(ctx, clone); err != nil {
-		return nil, unsent(err, clone.Body)
+		return nil, unsent(credentialError(err), clone.Body)
 	}
 	return base.RoundTrip(clone)
 }
 
-// unsent closes the body of a request that no credential could be attached
-// to and returns the credential error joined with a failed close.
+// unsent closes the body of a request that is not sent and returns err joined
+// with a failed close.
 func unsent(err error, body io.ReadCloser) error {
-	err = credentialError(err)
 	if body == nil || body == http.NoBody {
 		return err
 	}
@@ -135,19 +134,6 @@ func unsent(err error, body io.ReadCloser) error {
 		return errors.Join(err, fmt.Errorf(errPrefix+"close request body: %w", cerr))
 	}
 	return err
-}
-
-// crossOrigin reports a redirect chain that changed origin at any hop since
-// the original request, or whose hops cannot be compared.
-func crossOrigin(r *http.Request) bool {
-	for hop := r; hop.Response != nil; {
-		prev := hop.Response.Request
-		if prev == nil || !netguard.SameOrigin(hop.URL, prev.URL) {
-			return true
-		}
-		hop = prev
-	}
-	return false
 }
 
 // replayable reports whether r can be sent again: it has GetBody or no body.

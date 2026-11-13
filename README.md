@@ -456,7 +456,7 @@ import "github.com/ubyte-source/go-authware/v2/cred"
 | `Basic(user, password) (*Token, error)` | HTTP Basic credentials as a `Token`; `user` must be a clean header value without a colon |
 | `TokenSource`, `TokenSourceFunc` | Produces tokens; safe for concurrent use |
 | `Signer`, `SignerFunc`, `AsSigner` | Signs a request in place; `AsSigner` adapts a `TokenSource` |
-| `NewTransport(base, signer)` | Signs a clone of every request, with a copy of a `*Token` signer taken when the transport is built; a redirect chain that left the origin goes unsigned, also after it comes back |
+| `NewTransport(base, signer)` | Signs a clone of every request, with a copy of a `*Token` signer taken when the transport is built; it sends no request that follows a redirect, and the client that follows one gets `ErrRedirect` |
 | `NewCachedSource(src, opts...) (*CachedSource, error)` | Memoizes tokens until `WithSkew` (default 30s, at most half the lifetime) before expiry, sharing its own copy of each with the header value rendered once; a token already expired when it arrives counts as a failed refresh; `WithTimeout` bounds each refresh and `WithErrorLog` receives every failed one |
 | `NewClientCredentials(&ClientCredentialsConfig{...})` | OAuth2 `client_credentials` grant: the token endpoint `ClientConfig` plus `Audience` |
 | `NewRefreshToken(&ClientConfig{...}, store)` | OAuth2 `refresh_token` grant; rotated tokens saved through a `RefreshTokenStore` (`NewMemoryRefreshStore`) |
@@ -519,11 +519,13 @@ src, err := cred.NewClientCredentials(&cred.ClientCredentialsConfig{
   `metadata.google.internal`. The `Timeout` of each source config bounds
   every exchange (default 10s).
 - Every error that stops `AsSigner` or `NewTransport` from attaching a
-  credential wraps `ErrCredential`. An error answer of a token endpoint or a
-  metadata service is an `*OAuth2Error` whatever its size, read from its
-  first 4 KiB; `Transient()` reports 5xx, 429, `temporarily_unavailable` and
-  `slow_down`. Success answers over 1 MiB or malformed, and network tokens
-  that are not clean header credentials, wrap `ErrInvalidTokenResponse`.
+  credential wraps `ErrCredential`, and the request that follows a redirect,
+  which `NewTransport` refuses to send, fails with `ErrRedirect`. An error
+  answer of a token endpoint or a metadata service is an `*OAuth2Error`
+  whatever its size, read from its first 4 KiB; `Transient()` reports 5xx,
+  429, `temporarily_unavailable` and `slow_down`. Success answers over 1 MiB
+  or malformed, and network tokens that are not clean header credentials,
+  wrap `ErrInvalidTokenResponse`.
 - Concurrent `CachedSource` refreshes share one call, detached from the
   caller's cancellation and bounded by `WithTimeout` (default 10s, also for
   zero). A failed refresh goes to the `WithErrorLog` logger at warn level,
