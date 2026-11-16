@@ -14,14 +14,15 @@ import (
 	"strings"
 
 	"github.com/ubyte-source/go-authware/v2/internal/problems"
+	"github.com/ubyte-source/go-authware/v2/internal/syntax"
 )
 
 // MTLSConfig configures ModeMTLS. A certificate passes when a verified chain
 // matches a subject, or when its SPKI SHA-256 matches a pin.
 type MTLSConfig struct {
 	// AllowedSubjects (AUTH_MTLS_ALLOWED_SUBJECTS, a semicolon list) holds common
-	// names, or distinguished names when an entry contains '=', each written as
-	// pkix.Name.String renders it, but with a dotted type's value as #DER hex.
+	// names, or distinguished names when an entry contains '=', header values
+	// written as pkix.Name.String renders them, a dotted type's value as #DER hex.
 	AllowedSubjects []string
 	// AllowedSPKIPins (AUTH_MTLS_SPKI_PINS, a list of base64 digests) holds the
 	// SHA-256 digests of accepted SubjectPublicKeyInfo.
@@ -32,17 +33,20 @@ type MTLSConfig struct {
 func (m *MTLSConfig) inUse() bool { return len(m.AllowedSubjects) > 0 || len(m.AllowedSPKIPins) > 0 }
 
 // validate requires subjects or SPKI pins, each subject in rendered form and
-// each pin of the SHA-256 size.
+// admitting a header value, and each pin of the SHA-256 size.
 func (m *MTLSConfig) validate(p *problems.List) {
 	if !m.inUse() {
 		p.Addf("mtls needs allowed subjects or SPKI pins")
 	}
 	for _, s := range m.AllowedSubjects {
+		subject, _ := entrySubject(s)
 		switch {
 		case s == "":
 			p.Addf("mtls allowed subject is empty")
 		case !renderedSubject(s):
 			p.Addf("mtls allowed subject %q is not written as a subject renders", s)
+		case !syntax.IsFieldValue(subject):
+			p.Addf("mtls allowed subject %q admits no header value", s)
 		}
 	}
 	for i, pin := range m.AllowedSPKIPins {
@@ -52,11 +56,21 @@ func (m *MTLSConfig) validate(p *problems.List) {
 	}
 }
 
+// entrySubject returns the subject an allowed entry admits and whether it is a
+// distinguished name: s itself when it holds '=', else the common name s escapes.
+func entrySubject(s string) (subject string, dn bool) {
+	if strings.Contains(s, typeEnd) {
+		return s, true
+	}
+	return unescaped(s), false
+}
+
 // renderedSubject reports whether s, a subject entry, is a common name or a
 // distinguished name that subjectDN renders exactly as written.
 func renderedSubject(s string) bool {
-	if !strings.Contains(s, typeEnd) {
-		return subjectDN(&pkix.Name{CommonName: unescaped(s)}) == "CN="+s
+	subject, dn := entrySubject(s)
+	if !dn {
+		return subjectDN(&pkix.Name{CommonName: subject}) == "CN="+s
 	}
 	rdns := parseDN(s)
 	var name pkix.Name
@@ -315,16 +329,16 @@ func unescaped(entry string) string {
 	return b.String()
 }
 
-// pinPrefix starts the subject of a pinned key whose chain is unverified.
+// pinPrefix starts the subject a pinned key reports in place of its DN.
 const pinPrefix = "sha256/"
 
 // mtlsAuthenticator admits a client certificate whose verified chain matches
-// an allowed common or distinguished name, or whose SPKI digest is pinned. A
-// DN proves nothing without a verified chain, so such a pin names the client.
+// an allowed common or distinguished name, or whose SPKI digest is pinned; a
+// pinned key takes its DN only from a chain that proves it, else its pin.
 type mtlsAuthenticator struct {
 	cns    map[string]struct{}
 	dnames map[string]struct{}
-	// pins maps each pinned digest to the subject it reports without a chain.
+	// pins maps each pinned digest to the subject it reports in place of its DN.
 	pins map[[sha256.Size]byte]string
 	// absent refuses a request without a certificate, rejected any other.
 	absent   *authError
@@ -340,10 +354,11 @@ func newMTLSAuthenticator(c MTLSConfig) *mtlsAuthenticator {
 		rejected: failure(ErrInvalidCredentials, "client certificate rejected", nil),
 	}
 	for _, s := range c.AllowedSubjects {
-		if strings.Contains(s, typeEnd) {
-			a.dnames[s] = struct{}{}
+		subject, dn := entrySubject(s)
+		if dn {
+			a.dnames[subject] = struct{}{}
 		} else {
-			a.cns[unescaped(s)] = struct{}{}
+			a.cns[subject] = struct{}{}
 		}
 	}
 	for _, pin := range c.AllowedSPKIPins {
@@ -357,18 +372,9 @@ func (a *mtlsAuthenticator) authenticate(r *http.Request) (*Identity, *authError
 		return nil, a.absent
 	}
 	cert := r.TLS.PeerCertificates[0]
-	verified := len(r.TLS.VerifiedChains) > 0
-	if verified {
-		if subject, ok := a.allowedSubject(cert); ok {
-			return &Identity{mode: ModeMTLS, subject: subject, peer: cert}, nil
-		}
-	}
-	subject, ok := a.pins[sha256.Sum256(cert.RawSubjectPublicKeyInfo)]
+	subject, ok := a.subjectOf(cert, r.TLS.VerifiedChains)
 	if !ok {
 		return nil, a.rejected
-	}
-	if verified {
-		subject = subjectDN(&cert.Subject)
 	}
 	return &Identity{mode: ModeMTLS, subject: subject, peer: cert}, nil
 }
@@ -377,15 +383,23 @@ func (*mtlsAuthenticator) challengeScheme() string { return "" }
 
 func (*mtlsAuthenticator) mode() Mode { return ModeMTLS }
 
-// allowedSubject returns the allowed DN or CN of cert. A subject repeating
-// its common name or serial number matches nothing, since pkix.Name keeps
-// only the last; the DN is rendered only when some DN is allowed.
-func (a *mtlsAuthenticator) allowedSubject(cert *x509.Certificate) (string, bool) {
-	if repeatsSingleValued(cert.Subject.Names) {
-		return "", false
+// subjectOf returns the subject cert is admitted as. A verified chain proves
+// the name of a subject that repeats no common name or serial number, of which
+// pkix.Name keeps only the last; any other certificate is admitted by its pin.
+func (a *mtlsAuthenticator) subjectOf(cert *x509.Certificate, verified [][]*x509.Certificate) (string, bool) {
+	if len(verified) > 0 && !repeatsSingleValued(cert.Subject.Names) {
+		return a.provenSubject(cert)
 	}
+	return a.pinOf(cert)
+}
+
+// provenSubject returns the subject of cert, whose name a verified chain
+// proves: the allowed DN or CN it matches, else for a pinned key its DN or, when
+// that is no header value, the pin. It renders the DN once, and only if needed.
+func (a *mtlsAuthenticator) provenSubject(cert *x509.Certificate) (string, bool) {
+	dn := ""
 	if len(a.dnames) > 0 {
-		dn := subjectDN(&cert.Subject)
+		dn = subjectDN(&cert.Subject)
 		if _, ok := a.dnames[dn]; ok {
 			return dn, true
 		}
@@ -393,7 +407,23 @@ func (a *mtlsAuthenticator) allowedSubject(cert *x509.Certificate) (string, bool
 	if _, ok := a.cns[cert.Subject.CommonName]; ok {
 		return cert.Subject.CommonName, true
 	}
-	return "", false
+	pin, ok := a.pinOf(cert)
+	if !ok {
+		return "", false
+	}
+	if len(a.dnames) == 0 {
+		dn = subjectDN(&cert.Subject)
+	}
+	if !syntax.IsFieldValue(dn) {
+		return pin, true
+	}
+	return dn, true
+}
+
+// pinOf returns the subject the pinned key of cert reports.
+func (a *mtlsAuthenticator) pinOf(cert *x509.Certificate) (string, bool) {
+	pin, ok := a.pins[sha256.Sum256(cert.RawSubjectPublicKeyInfo)]
+	return pin, ok
 }
 
 // repeatsSingleValued reports whether names holds more than one common name

@@ -47,7 +47,6 @@ func TestClaimPolicyValidateClaims(t *testing.T) {
 		{"client_id before azp", claimsWith(map[string]any{claimSub: nil, claimClientID: "c", testClaimAzp: "z"}), "c",
 			rw},
 		{"sub before client_id", claimsWith(map[string]any{claimClientID: "c"}), testUser, rw},
-		{"no subject", claimsWith(map[string]any{claimSub: nil}), "", rw},
 		{"aud array last", claimsWith(map[string]any{claimAud: []string{"x", testMCPServer}}), testUser, rw},
 		{"aud array first", claimsWith(map[string]any{claimAud: []string{testMCPServer, "x"}}), testUser, rw},
 		{"exp 2^53", claimsWith(map[string]any{claimExp: int64(maxDate)}), testUser, rw},
@@ -62,8 +61,11 @@ func TestClaimPolicyValidateClaims(t *testing.T) {
 			testClaimRoles: []string{"r"}}), testUser, nil},
 		{"scope spaces", claimsWith(map[string]any{claimScope: "  a  b "}), testUser, []string{scopeA, scopeB}},
 		{"scope wins", claimsWith(map[string]any{claimScope: scopeA, claimScp: scopeB}), testUser, []string{scopeA}},
-		{"scp array", claimsWith(map[string]any{claimScope: nil, claimScp: []string{scopeA, "b c", "", "d\te"}}),
-			testUser, []string{scopeA, scopeB, "c", "d\te"}},
+		{"scp array", claimsWith(map[string]any{claimScope: nil, claimScp: []string{scopeA, "b c", "", "d:e/f"}}),
+			testUser, []string{scopeA, scopeB, "c", "d:e/f"}},
+		{"subject inner space and tab", claimsWith(map[string]any{claimSub: "a b\tc"}), "a b\tc", rw},
+		{"subject beyond ASCII", claimsWith(map[string]any{claimSub: "caf\u00e9"}), "caf\u00e9", rw},
+		{"scope token bounds", claimsWith(map[string]any{claimScope: "!#[]~"}), testUser, []string{"!#[]~"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,13 +77,30 @@ func TestClaimPolicyValidateClaims(t *testing.T) {
 	}
 }
 
+// claimRefusal is a payload and the refusal validateClaims answers it with.
+type claimRefusal struct {
+	name   string
+	claims map[string]any
+	want   error
+}
+
+// expectRefusals fails t unless testPolicy refuses each payload at testUnix with
+// its refusal and the zero claims.
+func expectRefusals(t *testing.T, tests []claimRefusal) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := testPolicy().validateClaims(mustJSON(t, tc.claims), time.Unix(testUnix, 0))
+			if !reflect.ValueOf(c).IsZero() || !errors.Is(err, tc.want) {
+				t.Fatalf("validateClaims = %+v, %v; want the zero claims, %v", c, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestClaimPolicyValidateClaimsRejects(t *testing.T) {
 	skew := int64(policySkew)
-	tests := []struct {
-		name   string
-		claims map[string]any
-		want   error
-	}{
+	expectRefusals(t, []claimRefusal{
 		{"sub number", claimsWith(map[string]any{claimSub: 7}), errMalformedClaims},
 		{"azp bool", claimsWith(map[string]any{claimSub: nil, testClaimAzp: true}), errMalformedClaims},
 		{"no iss", claimsWith(map[string]any{claimIss: nil}), errIssuer},
@@ -114,15 +133,44 @@ func TestClaimPolicyValidateClaimsRejects(t *testing.T) {
 		{"scope number", claimsWith(map[string]any{claimScope: 1}), errMalformedClaims},
 		{"scp mixed", claimsWith(map[string]any{claimScope: nil, claimScp: []any{scopeA, 2}}), errMalformedClaims},
 		{"scp object", claimsWith(map[string]any{claimScope: nil, claimScp: map[string]any{}}), errMalformedClaims},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			c, err := testPolicy().validateClaims(mustJSON(t, tc.claims), time.Unix(testUnix, 0))
-			if !reflect.ValueOf(c).IsZero() || !errors.Is(err, tc.want) {
-				t.Fatalf("validateClaims = %+v, %v; want the zero claims, %v", c, err, tc.want)
-			}
-		})
-	}
+	})
+}
+
+// TestClaimPolicyValidateClaimsRejectsSubjects refuses a token that names no
+// subject, and one whose subject, in any of its claims, is no header value.
+func TestClaimPolicyValidateClaimsRejectsSubjects(t *testing.T) {
+	expectRefusals(t, []claimRefusal{
+		{"no subject", claimsWith(map[string]any{claimSub: nil}), errMissingSubject},
+		{"empty subjects", claimsWith(map[string]any{claimSub: "", claimClientID: "", testClaimAzp: ""}),
+			errMissingSubject},
+		{"subject space first", claimsWith(map[string]any{claimSub: " user"}), errSubjectValue},
+		{"subject space last", claimsWith(map[string]any{claimSub: "user "}), errSubjectValue},
+		{"subject tab last", claimsWith(map[string]any{claimSub: "user\t"}), errSubjectValue},
+		{"subject line feed", claimsWith(map[string]any{claimSub: "a\nb"}), errSubjectValue},
+		{"subject only spaces", claimsWith(map[string]any{claimSub: "  "}), errSubjectValue},
+		{"subject DEL", claimsWith(map[string]any{claimSub: "a\x7fb"}), errSubjectValue},
+		{"blank sub before client_id", claimsWith(map[string]any{claimSub: " ", claimClientID: "c"}),
+			errSubjectValue},
+		{"client_id control", claimsWith(map[string]any{claimSub: "", claimClientID: "c\x00"}), errSubjectValue},
+		{"azp space", claimsWith(map[string]any{claimSub: nil, testClaimAzp: "z "}), errSubjectValue},
+	})
+}
+
+// TestClaimPolicyValidateClaimsRejectsScopes refuses a token one of whose
+// scopes, in scope or scp, is no scope token.
+func TestClaimPolicyValidateClaimsRejectsScopes(t *testing.T) {
+	expectRefusals(t, []claimRefusal{
+		{"scope tab", claimsWith(map[string]any{claimScope: "a\tb"}), errScopeToken},
+		{"scope line break", claimsWith(map[string]any{claimScope: "read\r\nadmin"}), errScopeToken},
+		{"scope quote", claimsWith(map[string]any{claimScope: `a"b`}), errScopeToken},
+		{"scope backslash", claimsWith(map[string]any{claimScope: `a\b`}), errScopeToken},
+		{"scope beyond ASCII", claimsWith(map[string]any{claimScope: "caf\u00e9"}), errScopeToken},
+		{"scope DEL", claimsWith(map[string]any{claimScope: "a\x7f"}), errScopeToken},
+		{"scp tab", claimsWith(map[string]any{claimScope: nil, claimScp: []string{scopeA, "d\te"}}), errScopeToken},
+		{"scp tabs first", claimsWith(map[string]any{claimScope: nil, claimScp: []string{"d\te", "f\tg", scopeA}}),
+			errScopeToken},
+		{"scp string control", claimsWith(map[string]any{claimScope: nil, claimScp: "a \x01"}), errScopeToken},
+	})
 }
 
 func TestClaimPolicyValidateClaimsEncoding(t *testing.T) {
@@ -158,7 +206,7 @@ func TestClaimPolicyValidateClaimsNamesTheClaim(t *testing.T) {
 		claimIss: errIssNotString, claimSub: errSubNotString, claimClientID: errClientIDNotString,
 		testClaimAzp: errAzpNotString, claimScope: errScopeNotString,
 	} {
-		members := map[string]any{claimSub: nil}
+		members := map[string]any{claimSub: nil, testClaimAzp: "z"}
 		members[claim] = 1
 		payload := mustJSON(t, claimsWith(members))
 		if _, err := testPolicy().validateClaims(payload, time.Unix(testUnix, 0)); !errors.Is(err, want) {
@@ -231,6 +279,11 @@ func FuzzClaimPolicyValidateClaims(f *testing.F) {
 			claimIat: testUnix + policySkew + 1}),
 		claimsWith(map[string]any{testClaimNonce: "n", claimCHash: "h"}),
 		claimsWith(map[string]any{claimSub: "", claimClientID: "c", testClaimAzp: 7}),
+		claimsWith(map[string]any{claimSub: nil}), claimsWith(map[string]any{claimSub: "", testClaimAzp: ""}),
+		claimsWith(map[string]any{claimSub: " u"}), claimsWith(map[string]any{claimSub: "a\tb", claimScope: "a\tb"}),
+		claimsWith(map[string]any{claimSub: "", claimClientID: "c\n"}),
+		claimsWith(map[string]any{claimScope: nil, claimScp: []string{`a"`, scopeA}}),
+		claimsWith(map[string]any{claimScope: nil, claimScp: []string{"x y", "z"}}),
 		claimsWith(map[string]any{claimExp: testUnix - policySkew - 1, claimAud: []any{testMCPServer, 1}}),
 	} {
 		f.Add(mustJSON(f, c))
@@ -248,26 +301,95 @@ func FuzzClaimPolicyValidateClaims(f *testing.F) {
 	})
 }
 
-func TestEachString(t *testing.T) {
+// TestScpStrings passes fn each string up to the first fault: a value or an
+// element that is no string, or the string fn fails on, here "stop".
+func TestScpStrings(t *testing.T) {
 	tests := []struct {
 		raw  string
 		want []string
-		ok   bool
+		err  error
 	}{
-		{`"x y"`, []string{"x y"}, true},
-		{escapedScopeA, []string{scopeA}, true},
-		{`["a",""]`, []string{scopeA, ""}, true},
-		{jsonEmptyArray, nil, true},
-		{`["a",1]`, []string{scopeA}, false},
-		{`{}`, nil, false},
-		{`1`, nil, false},
-		{`"a"x`, nil, false},
+		{`"x y"`, []string{"x y"}, nil},
+		{escapedScopeA, []string{scopeA}, nil},
+		{`["a",""]`, []string{scopeA, ""}, nil},
+		{jsonEmptyArray, nil, nil},
+		{`["a",1]`, []string{scopeA}, errScopeType},
+		{`[1,"a"]`, nil, errScopeType},
+		{`{}`, nil, errScopeType},
+		{`1`, nil, errScopeType},
+		{`"a"x`, nil, errScopeType},
+		{`"stop"`, nil, errOther},
+		{`["a","stop","b"]`, []string{scopeA}, errOther},
+		{`["a","stop",1]`, []string{scopeA}, errOther},
 	}
 	for _, tc := range tests {
 		var got []string
-		ok := eachString(tc.raw, func(s string) { got = append(got, s) })
-		if ok != tc.ok || !slices.Equal(got, tc.want) {
-			t.Errorf("eachString(%s) = %q, %v, want %q, %v", tc.raw, got, ok, tc.want, tc.ok)
+		err := scpStrings(tc.raw, func(s string) error {
+			if s == "stop" {
+				return errOther
+			}
+			got = append(got, s)
+			return nil
+		})
+		if !errors.Is(err, tc.err) || (err == nil) != (tc.err == nil) || !slices.Equal(got, tc.want) {
+			t.Errorf("scpStrings(%s) = %q, %v, want %q, %v", tc.raw, got, err, tc.want, tc.err)
+		}
+	}
+}
+
+// TestRawClaimsSubject returns the first non-empty of sub, client_id and azp,
+// and no subject with the refusal of the first fault of the claims it reads.
+func TestRawClaimsSubject(t *testing.T) {
+	tests := []struct {
+		name               string
+		sub, clientID, azp string
+		want               string
+		err                error
+	}{
+		{"sub", `"u"`, `"c"`, `"z"`, "u", nil},
+		{"client_id", `""`, `"c"`, `"z"`, "c", nil},
+		{"azp", "", `""`, `"z"`, "z", nil},
+		{"sub before a client_id that is no string", `"u"`, `1`, "", "u", nil},
+		{"none", "", `""`, "", "", errMissingSubject},
+		{"sub number", `1`, `"c"`, "", "", errSubNotString},
+		{"azp number", "", "", `1`, "", errAzpNotString},
+		{"sub space last", `"u "`, `"c"`, "", "", errSubjectValue},
+		{"client_id line feed", "", `"c\n"`, `"z"`, "", errSubjectValue},
+	}
+	for _, tc := range tests {
+		got, err := (&rawClaims{sub: tc.sub, clientID: tc.clientID, azp: tc.azp}).subject()
+		if got != tc.want || !errors.Is(err, tc.err) || (err == nil) != (tc.err == nil) {
+			t.Errorf("%s: subject = %q, %v, want %q, %v", tc.name, got, err, tc.want, tc.err)
+		}
+	}
+}
+
+// TestRawClaimsScopes returns the tokens the claims grant, and no token with
+// the refusal of the first fault of scope or scp.
+func TestRawClaimsScopes(t *testing.T) {
+	tests := []struct {
+		name       string
+		scope, scp string
+		want       []string
+		err        error
+	}{
+		{"neither", "", "", nil, nil},
+		{"scope", `" a  b "`, `"c"`, []string{scopeA, scopeB}, nil},
+		{"scp string", "", `"a b"`, []string{scopeA, scopeB}, nil},
+		{"scp array", "", `["a","b c",""]`, []string{scopeA, scopeB, "c"}, nil},
+		{"scope number", `1`, "", nil, errScopeNotString},
+		{"scope tab", `"a\tb"`, "", nil, errScopeToken},
+		{"scp number", "", `1`, nil, errScopeType},
+		{"scp bad token last", "", `["a","d\te"]`, nil, errScopeToken},
+		{"scp bad token first", "", `["d\te","a"]`, nil, errScopeToken},
+		{"scp bad token before a number", "", `["d\te",2]`, nil, errScopeToken},
+		{"scp number before a bad token", "", `["a",2,"d\te"]`, nil, errScopeType},
+	}
+	for _, tc := range tests {
+		got, err := (&rawClaims{scope: tc.scope, scp: tc.scp}).scopes()
+		if !errors.Is(err, tc.err) || (err == nil) != (tc.err == nil) || !slices.Equal(got, tc.want) ||
+			(err != nil && got != nil) {
+			t.Errorf("%s: scopes = %q, %v, want %q, %v", tc.name, got, err, tc.want, tc.err)
 		}
 	}
 }

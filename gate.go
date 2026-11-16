@@ -165,11 +165,11 @@ func (g *Gate) CheckHandler() http.Handler {
 			g.denyAt(w, r, e, originalPath)
 			return
 		}
-		vals[checkSubject], vals[checkMethod] = sanitizeHeaderValue(id.subject), string(id.mode)
+		vals[checkSubject], vals[checkMethod] = id.subject, string(id.mode)
 		h["X-Auth-Subject"] = vals[checkSubject:checkMethod:checkMethod]
 		h["X-Auth-Method"] = vals[checkMethod:checkScopes:checkScopes]
 		if len(id.scopes) > 0 {
-			vals[checkScopes] = sanitizeHeaderValue(strings.Join(id.scopes, " "))
+			vals[checkScopes] = strings.Join(id.scopes, " ")
 			h["X-Auth-Scopes"] = vals[checkScopes:checkValues:checkValues]
 		}
 		w.WriteHeader(http.StatusOK)

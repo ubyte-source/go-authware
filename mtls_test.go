@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
@@ -35,6 +37,10 @@ const (
 	intValue = 7
 	shortCN  = "x"
 )
+
+// renderedDNAllocs is what admitting a certificate by its two-attribute DN
+// allocates: the rendered DN and the identity.
+const renderedDNAllocs = 9
 
 // x520 returns the X.520 attribute type 2.5.4.arc.
 func x520(arc int) asn1.ObjectIdentifier {
@@ -68,6 +74,8 @@ func TestMTLSAuthenticator(t *testing.T) {
 		{"dn", testCert(testAdmin, testOrg), verifiedMTLSRequest, testAdminDN},
 		{"pin without chain", pinned, mtlsRequest, pinSubject},
 		{"pin with chain", pinned, verifiedMTLSRequest, "CN=pinned"},
+		{"pin with chain, allowed cn", mustSubjectCert(pkix.Name{CommonName: testCN, Organization: []string{testOrg}}.
+			ToRDNSequence(), string(pinned.RawSubjectPublicKeyInfo)), verifiedMTLSRequest, testCN},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,6 +84,40 @@ func TestMTLSAuthenticator(t *testing.T) {
 				t.Fatalf("authenticate = %+v, %v, want an mTLS identity of %s", id, e, tc.subject)
 			}
 		})
+	}
+}
+
+// TestMTLSAuthenticatorPinWithoutProvenName reports the pin of a key whose DN
+// no chain proves or no header carries, with a DN allowed or not: no DN, a
+// repeated common name or serial number, a line break, a space at its end.
+func TestMTLSAuthenticatorPinWithoutProvenName(t *testing.T) {
+	const key = "spki-pinned"
+	pin := sha256.Sum256([]byte(key))
+	pinSubject := "sha256/" + base64.StdEncoding.EncodeToString(pin[:])
+	cn, serial := x520(arcCommonName), x520(arcSerialNumber)
+	attr := func(oid asn1.ObjectIdentifier, v string) []pkix.AttributeTypeAndValue {
+		return []pkix.AttributeTypeAndValue{{Type: oid, Value: v}}
+	}
+	twoCNs := pkix.RDNSequence{attr(cn, "evil"), attr(cn, testCN)}
+	unnamed := map[string]pkix.RDNSequence{
+		"no DN": {}, "two common names": twoCNs, "two serial numbers": {attr(serial, "1"), attr(serial, "2")},
+		"DN of two lines": {attr(cn, "ad\nmin")}, "DN ending in a space": {attr(cn, "admin ")},
+	}
+	for allowed, subjects := range map[string][]string{
+		"no DN allowed": {testCN}, "a DN allowed": {testCN, testAdminDN},
+	} {
+		a := newMTLSAuthenticator(MTLSConfig{AllowedSubjects: subjects, AllowedSPKIPins: [][]byte{pin[:]}})
+		for name, rdns := range unnamed {
+			id, e := a.authenticate(verifiedMTLSRequest(t, mustSubjectCert(rdns, key)))
+			if e != nil || id.Subject() != pinSubject {
+				t.Errorf("%s, %s: authenticate = %+v, %v, want the subject %s", allowed, name, id, e, pinSubject)
+			}
+		}
+		id, e := a.authenticate(mtlsRequest(t, mustSubjectCert(twoCNs, key)))
+		if e != nil || id.Subject() != pinSubject {
+			t.Errorf("%s, two common names without chain: authenticate = %+v, %v, want the subject %s", allowed, id,
+				e, pinSubject)
+		}
 	}
 }
 
@@ -107,6 +149,9 @@ func TestMTLSAuthenticatorRejects(t *testing.T) {
 		{"dn spelled as cn", testCert(testAdminDN), verifiedMTLSRequest, ErrInvalidCredentials},
 		{"cn of dn entry", testCert(testAdmin), verifiedMTLSRequest, ErrInvalidCredentials},
 		{"unknown", testCert("other"), verifiedMTLSRequest, ErrInvalidCredentials},
+		{"two common names without chain", mustSubjectCert(pkix.RDNSequence{
+			{{Type: x520(arcCommonName), Value: "evil"}}, {{Type: x520(arcCommonName), Value: testCN}},
+		}, "spki"), mtlsRequest, ErrInvalidCredentials},
 		{"no certificate", nil, mtlsRequest, ErrMissingCredentials},
 	}
 	for _, tc := range tests {
@@ -156,6 +201,9 @@ func TestMTLSAuthenticatorAmbiguousSubject(t *testing.T) {
 		"spki")
 	if id, e := a.authenticate(verifiedMTLSRequest(t, other)); e != nil || id.Subject() != testAdmin {
 		t.Fatalf("one common name beside repeated surnames: authenticate = %v, %v, want admin", id, e)
+	}
+	if id, e := a.authenticate(verifiedMTLSRequest(t, testCert(testAdmin))); e != nil || id.Subject() != "CN=admin" {
+		t.Fatalf("a subject both entries allow: authenticate = %v, %v, want the DN CN=admin", id, e)
 	}
 }
 
@@ -217,6 +265,54 @@ func TestMTLSAuthenticatorRenderedCommonName(t *testing.T) {
 	}
 	if err := (&Config{Mode: ModeMTLS, MTLS: MTLSConfig{AllowedSubjects: allowed}}).Validate(); err != nil {
 		t.Fatalf("Validate(rendered common names) = %v, want nil", err)
+	}
+}
+
+// TestMTLSAuthenticatorRenderedDN keeps the escapes of a DN: an allowed DN admits
+// the certificate that renders it, not the one its unescaped text spells, and a
+// pinned key reports its DN as rendered.
+func TestMTLSAuthenticatorRenderedDN(t *testing.T) {
+	const entry = `CN=a\,OU=x,O=corp`
+	named := testCert("a,OU=x", testOrg)
+	spelled := mustSubjectCert(pkix.Name{
+		CommonName: "a", OrganizationalUnit: []string{"x"}, Organization: []string{testOrg},
+	}.ToRDNSequence(), "spki-spelled")
+	pin := sha256.Sum256(named.RawSubjectPublicKeyInfo)
+	allowed := newMTLSAuthenticator(MTLSConfig{AllowedSubjects: []string{entry}})
+	pinned := newMTLSAuthenticator(MTLSConfig{AllowedSPKIPins: [][]byte{pin[:]}})
+	for name, a := range map[string]*mtlsAuthenticator{"allowed": allowed, "pinned": pinned} {
+		if id, e := a.authenticate(verifiedMTLSRequest(t, named)); e != nil || id.Subject() != entry {
+			t.Errorf("%s: authenticate(the certificate of %s) = %+v, %v; want that subject", name, entry, id, e)
+		}
+	}
+	if id, e := allowed.authenticate(verifiedMTLSRequest(t, spelled)); id != nil || e == nil ||
+		!errors.Is(e, ErrInvalidCredentials) {
+		t.Errorf("authenticate(CN=a,OU=x,O=corp) = %+v, %v; want nil, ErrInvalidCredentials", id, e)
+	}
+}
+
+// TestMTLSConfigValidateHeaderValues refuses an allowed subject that admits no
+// header value, by the common name it escapes or by its DN, and accepts one
+// with an inner space, an inner tab or a letter beyond ASCII.
+func TestMTLSConfigValidateHeaderValues(t *testing.T) {
+	validate := func(s string) error {
+		return (&Config{Mode: ModeMTLS, MTLS: MTLSConfig{AllowedSubjects: []string{s}}}).Validate()
+	}
+	for _, s := range []string{"evil\r\nSet-Cookie: x", `svc\ `, `\ svc`, `CN=svc\ `, "CN=a\x00b,O=x", "a\x7fb"} {
+		want := "mtls allowed subject " + strconv.Quote(s) + " admits no header value"
+		if err := validate(s); !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate(allowed subject %q) = %v, want ErrInvalidConfig: %s", s, err, want)
+		}
+	}
+	for _, s := range []string{"svc one", "a\tb", "caf\u00e9", "CN=svc one,O=a\tb"} {
+		if err := validate(s); err != nil {
+			t.Errorf("Validate(allowed subject %q) = %v, want nil", s, err)
+		}
+	}
+	const unrendered = `mtls allowed subject "trail " is not written as a subject renders`
+	if err := validate("trail "); !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), unrendered) ||
+		strings.Contains(err.Error(), "header value") {
+		t.Errorf(`Validate(allowed subject "trail ") = %v, want only: %s`, err, unrendered)
 	}
 }
 
@@ -345,6 +441,41 @@ func FuzzSubjectDN(f *testing.F) {
 	})
 }
 
+// FuzzMTLSAuthenticator admits a pinned key of any common name and organization
+// on a verified chain, with a DN allowed or not: its subject is the DN stdlibDN
+// renders when fieldValuePattern matches it, else the pin.
+func FuzzMTLSAuthenticator(f *testing.F) {
+	for _, seed := range [][2]string{
+		{"pinned", testOrg}, {testAdmin, testOrg}, {"", ""}, {"ad\nmin", ""}, {"admin ", ""}, {" admin", "x"},
+		{"a,b", "c\td"}, {"a\x00", "\xff"}, {"caf\u00e9", ""}, {"", " "},
+	} {
+		f.Add(seed[0], seed[1])
+	}
+	const key = "spki-fuzz"
+	pin := sha256.Sum256([]byte(key))
+	pins := [][]byte{pin[:]}
+	allowed := MTLSConfig{AllowedSubjects: []string{testAdminDN}, AllowedSPKIPins: pins}
+	authenticators := map[string]*mtlsAuthenticator{
+		"no DN allowed": newMTLSAuthenticator(MTLSConfig{AllowedSPKIPins: pins}),
+		"a DN allowed":  newMTLSAuthenticator(allowed),
+	}
+	f.Fuzz(func(t *testing.T, cn, org string) {
+		cert := &x509.Certificate{Subject: pkix.Name{CommonName: cn}, RawSubjectPublicKeyInfo: []byte(key)}
+		if org != "" {
+			cert.Subject.Organization = []string{org}
+		}
+		want := stdlibDN(&cert.Subject)
+		if !fieldValuePattern.MatchString(want) {
+			want = "sha256/" + base64.StdEncoding.EncodeToString(pin[:])
+		}
+		for name, a := range authenticators {
+			if id, e := a.authenticate(verifiedMTLSRequest(t, cert)); e != nil || id.Subject() != want {
+				t.Fatalf("%s: authenticate(CN %q, O %q) = %+v, %v; want the subject %q", name, cn, org, id, e, want)
+			}
+		}
+	})
+}
+
 func TestX520Name(t *testing.T) {
 	for _, tc := range []struct {
 		t    asn1.ObjectIdentifier
@@ -421,6 +552,32 @@ func TestUnescaped(t *testing.T) {
 		if got := unescaped(entry); got != want {
 			t.Errorf("unescaped(%q) = %q, want %q", entry, got, want)
 		}
+	}
+}
+
+// TestMTLSAuthenticatorRendersTheDNOnce admits a certificate by its allowed
+// DN, and a pinned key by the DN its chain proves with a DN allowed or not:
+// each renders the DN once.
+func TestMTLSAuthenticatorRendersTheDNOnce(t *testing.T) {
+	const dn = "CN=pinned,O=corp"
+	cert := testCert("pinned", testOrg)
+	pin := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	pins := [][]byte{pin[:]}
+	r := verifiedMTLSRequest(t, cert)
+	for name, cfg := range map[string]MTLSConfig{
+		"allowed DN":              {AllowedSubjects: []string{dn}},
+		"pin, no DN allowed":      {AllowedSubjects: []string{testCN}, AllowedSPKIPins: pins},
+		"pin, another DN allowed": {AllowedSubjects: []string{testAdminDN}, AllowedSPKIPins: pins},
+	} {
+		a := newMTLSAuthenticator(cfg)
+		if id, e := a.authenticate(r); e != nil || id.Subject() != dn {
+			t.Fatalf("%s: authenticate = %+v, %v, want the subject %s", name, id, e, dn)
+		}
+		assertAllocs(t, renderedDNAllocs, func() {
+			if _, e := a.authenticate(r); e != nil {
+				t.Errorf("%s: authenticate = %v, want nil", name, e)
+			}
+		})
 	}
 }
 

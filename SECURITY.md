@@ -38,6 +38,8 @@ services. It defends against:
 - Plaintext transport of signing material and client credentials.
 - Timing side channels in secret comparison.
 - Header and log injection through attacker-controlled claims.
+- Callers that cannot be told apart: a token that names no subject, and a
+  subject or a scope that a header line would alter.
 - Resource exhaustion through oversized tokens, bodies or nested JSON.
 - Replayed signed requests.
 - Open redirects and parameter smuggling through the authorization server
@@ -60,9 +62,9 @@ services. It defends against:
 - **Fail-closed configuration.** `New` refuses a setting in the section of a
   mode other than the selected one, a bearer token or API key that cannot
   travel in a header, a `PublicURL` that is not a canonical origin (lower
-  case, no default port) and an mTLS subject that is not written as
-  `pkix.Name.String` renders it, with the value of a dotted type as `#` and
-  the hex of its DER on every Go version.
+  case, no default port) and an mTLS subject that admits no header value or
+  is not written as `pkix.Name.String` renders it, with the value of a
+  dotted type as `#` and the hex of its DER on every Go version.
 - **Discovery pinning.** The discovered `issuer` must equal the configured
   issuer exactly, and `jwks_uri`, `authorization_endpoint` and
   `token_endpoint` must share the issuer's scheme, host and port.
@@ -86,6 +88,14 @@ services. It defends against:
   `ClockSkew`, `nbf` and `iat` bounded, time claims numbers from 0 to 2^53,
   `at_hash` or `c_hash`, or `nonce` without any of `scope`, `scp` or
   `roles`, refused as ID tokens, `RequireAccessTokenType` for `at+jwt`.
+- **Subject and scopes.** Every identity a Gate returns outside `ModeNone`
+  has a subject that is a header value, with no control byte but an inner
+  tab and no space or tab at either end, and scopes that are scope tokens. A
+  token names its subject in `sub`, `client_id` or `azp` and is refused
+  without one, with one that is no header value, or with a scope that is no
+  scope token; the static modes report `static-bearer` or `static-apikey`,
+  and mTLS a matched name, the DN a pinned key's verified chain proves, or
+  the pin. `CheckHandler` sends both as the identity holds them.
 - **Key availability.** Key and issuer metadata fetches are single-flighted,
   detached from the caller and bounded by `FetchTimeout`. Stale keys and
   metadata are served while fetches fail until 24h after their fetch, so a
@@ -101,9 +111,10 @@ services. It defends against:
   an ASCII token; HMAC signatures, replay MACs and `secret.Value.Equal` are
   constant time.
 - **Header and log injection.** Challenge parameters are quoted-string
-  escaped and control bytes blanked; `CheckHandler` blanks control bytes
-  in identity headers and sends `Cache-Control: no-store`. Error bodies are
-  fixed words; client-visible error descriptions are fixed texts.
+  escaped and control bytes blanked; the subject and the scopes that
+  `CheckHandler` sends hold no line break, and its answers are
+  `Cache-Control: no-store`. Error bodies are fixed words; client-visible
+  error descriptions are fixed texts.
 - **Facade.** `/authorize` validates `redirect_uri`, `response_type=code`
   and an S256 PKCE challenge before redirecting, and answers anything else
   with 400 JSON instead of a redirect. Repeated parameters and request
@@ -120,13 +131,14 @@ services. It defends against:
   metadata take their origin from `PublicURL`, or from the request with
   `X-Forwarded-Proto` trusted only when `TrustForwardedProto` is set;
   request-derived documents are `private` and vary by host and scheme.
-- **mTLS.** Subjects match only on a chain verified by the TLS layer; SPKI
-  pins bind the key itself, and a pin without a verified chain reports the
-  subject `sha256/<base64 pin>`, never the certificate's self-asserted DN,
-  so `HasSubject` and `X-Auth-Subject` cannot be spoofed through a pinned
-  key. A subject repeating its common name or serial number, of which
-  `pkix.Name` keeps only the last, matches nothing. A refused certificate
-  gets 403 without a challenge.
+- **mTLS.** Subjects match only on a chain verified by the TLS layer, and a
+  subject repeating its common name or serial number, of which `pkix.Name`
+  keeps only the last, matches nothing. SPKI pins bind the key itself; a pin
+  reports the DN of a verified chain only when the subject repeats neither
+  and that DN is a header value, else `sha256/<base64 pin>`, never a
+  self-asserted or ambiguous DN, so `HasSubject` and `X-Auth-Subject` cannot
+  be spoofed through a pinned key. A refused certificate gets 403 without a
+  challenge.
 - **Secrets.** A non-zero `secret.Value` renders as `***` through `fmt`,
   `log/slog`, JSON and text encoding, the zero Value as nothing, but `fmt`
   prints its type for `%T` and the address it holds, never the secret, for
@@ -229,12 +241,14 @@ services. It defends against:
   signatures of every algorithm against the standard library
   (`FuzzVerifySignature`, `FuzzEncodeDER`), key sets (`FuzzParseJWKS`), claims
   (`FuzzClaimPolicyValidateClaims`, `FuzzDecodeClaimValue`), end-to-end
-  validation (`FuzzOAuthAuthenticatorValidateToken`), the Authorization header
+  validation (`FuzzOAuthAuthenticatorValidateToken`), the check answer of any
+  subject and scope (`FuzzGateCheckHandler`), the Authorization header
   (`FuzzAuthorizationCredential`), `X-Forwarded-Proto` (`FuzzForwardedProto`),
   the `X-Original-URI` request target (`FuzzOriginalPath`), mTLS subject names
-  (`FuzzSubjectDN`), discovery documents (`FuzzFetchMetadata`), the facade
-  authorization redirect, token relay, upstream token answers and client
-  registration (`FuzzFacadeServeAuthorize`, `FuzzFacadeServeToken`,
+  and the subject of a pinned key (`FuzzSubjectDN`, `FuzzMTLSAuthenticator`),
+  discovery documents (`FuzzFetchMetadata`), the facade authorization
+  redirect, token relay, upstream token answers and client registration
+  (`FuzzFacadeServeAuthorize`, `FuzzFacadeServeToken`,
   `FuzzFacadeServeTokenUpstreamAnswer`, `FuzzRedirectURIs`), header sanitizing
   (`FuzzSanitizeHeaderValue`), the environment list splitter
   (`FuzzSplitList`), the strict JSON objects (`FuzzIterate`), the outbound URL

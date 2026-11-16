@@ -363,6 +363,9 @@ func verifiedMTLSRequest(tb testing.TB, cert *x509.Certificate) *http.Request {
 // testUnix is the fixed verification time of the JWT tests, in seconds.
 const testUnix = 1_800_000_000
 
+// errOther is an error that no classification knows.
+var errOther = errors.New("test: other")
+
 // tokenLimit is the largest encoded token accepted, 16 KiB.
 const tokenLimit = 16 << 10
 
@@ -1524,7 +1527,8 @@ func referenceDate(raw json.RawMessage) (float64, bool) {
 }
 
 // referenceSubject returns the first non-empty of sub, client_id and azp, each
-// a string when present.
+// a string when present; it refuses a token that names none, and a subject
+// that is no field value.
 func referenceSubject(m map[string]json.RawMessage) (string, error) {
 	for _, name := range []string{"sub", "client_id", "azp"} {
 		v, present := m[name]
@@ -1532,37 +1536,46 @@ func referenceSubject(m map[string]json.RawMessage) (string, error) {
 			continue
 		}
 		s, ok := stringValue(v)
-		if !ok {
+		switch {
+		case !ok:
+			return "", errMalformedClaims
+		case s == "":
+			continue
+		case !fieldValuePattern.MatchString(s):
 			return "", errMalformedClaims
 		}
-		if s != "" {
-			return s, nil
-		}
+		return s, nil
 	}
-	return "", nil
+	return "", errMissingSubject
 }
 
+// fieldValuePattern matches an HTTP field value: no control byte but an inner
+// tab, and neither a space nor a tab at either end, at least one byte.
+var fieldValuePattern = regexp.MustCompile(`^[^\x00-\x20\x7f]([^\x00-\x08\x0a-\x1f\x7f]*[^\x00-\x20\x7f])?$`)
+
 // referenceScopes splits on spaces the scope string or, without scope, each
-// string of scp, a string or an array of strings, dropping empty tokens.
+// string of scp, a string or an array of strings, dropping empty tokens; it
+// refuses a token that is no OAuth scope-token.
 func referenceScopes(m map[string]json.RawMessage) ([]string, error) {
+	var list []string
 	if v, present := m["scope"]; present {
 		s, ok := stringValue(v)
 		if !ok {
 			return nil, errMalformedClaims
 		}
-		return spaceFields(s), nil
-	}
-	v, present := m["scp"]
-	if !present {
-		return nil, nil
-	}
-	list, ok := stringOrStrings(v)
-	if !ok {
-		return nil, errMalformedClaims
+		list = []string{s}
+	} else if v, present := m["scp"]; present {
+		var ok bool
+		if list, ok = stringOrStrings(v); !ok {
+			return nil, errMalformedClaims
+		}
 	}
 	var tokens []string
 	for _, s := range list {
 		tokens = append(tokens, spaceFields(s)...)
+	}
+	if slices.ContainsFunc(tokens, func(s string) bool { return !scopeToken(s) }) {
+		return nil, errMalformedClaims
 	}
 	return tokens, nil
 }

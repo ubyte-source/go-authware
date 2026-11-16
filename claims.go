@@ -8,6 +8,7 @@ import (
 	"github.com/ubyte-source/go-jsonfast"
 
 	"github.com/ubyte-source/go-authware/v2/internal/jsonobj"
+	"github.com/ubyte-source/go-authware/v2/internal/syntax"
 )
 
 // maxNumericDate is the largest time claim accepted, in seconds: 2^53.
@@ -35,6 +36,7 @@ const (
 	errIssuer          = tokenError("invalid token issuer")
 	errAudience        = tokenError("invalid token audience")
 	errMissingExpiry   = tokenError("missing exp claim")
+	errMissingSubject  = tokenError("missing subject claim")
 	errNotYetValid     = tokenError("token not yet valid")
 	errIssuedInFuture  = tokenError("token issued in the future")
 	errIDToken         = tokenError("ID token not accepted")
@@ -45,6 +47,8 @@ var (
 	errNoAudience        = fmt.Errorf("%w: no aud", errAudience)
 	errAudienceType      = fmt.Errorf("%w: aud is neither a string nor an array of strings", errMalformedClaims)
 	errScopeType         = fmt.Errorf("%w: scp is neither a string nor an array of strings", errMalformedClaims)
+	errScopeToken        = fmt.Errorf("%w: a scope is not a scope token", errMalformedClaims)
+	errSubjectValue      = fmt.Errorf("%w: the subject is not a header value", errMalformedClaims)
 	errExpTime           = fmt.Errorf("%w: exp is not a time", errMalformedClaims)
 	errNbfTime           = fmt.Errorf("%w: nbf is not a time", errMalformedClaims)
 	errIatTime           = fmt.Errorf("%w: iat is not a time", errMalformedClaims)
@@ -241,7 +245,9 @@ func numericDate(raw string, malformed error) (time.Time, error) {
 	return time.Unix(int64(sec), int64(frac*float64(time.Second))), nil
 }
 
-// subject returns the first non-empty of sub, client_id and azp.
+// subject returns the first non-empty of sub, client_id and azp, a header
+// value. It fails with errMissingSubject without one, with errSubjectValue for
+// another value, and with the refusal naming a claim it reads that is no string.
 func (c *rawClaims) subject() (string, error) {
 	for _, claim := range [...]struct {
 		raw       string
@@ -251,20 +257,28 @@ func (c *rawClaims) subject() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if s != "" {
-			return s, nil
+		if s == "" {
+			continue
 		}
+		if !syntax.IsFieldValue(s) {
+			return "", errSubjectValue
+		}
+		return s, nil
 	}
-	return "", nil
+	return "", errMissingSubject
 }
 
-// scopes returns the tokens of scope, a space-separated string, or else of
-// scp, such a string or an array of strings.
+// scopes returns the scope tokens of scope, a space-separated string, or else
+// of scp, such a string or an array of strings; errScopeToken refuses a field
+// that is no scope token.
 func (c *rawClaims) scopes() ([]string, error) {
 	if c.scope != "" {
 		s, err := claimString(c.scope, errScopeNotString)
 		if err != nil {
 			return nil, err
+		}
+		if !scopeList(s) {
+			return nil, errScopeToken
 		}
 		return scopeTokens(s), nil
 	}
@@ -272,9 +286,15 @@ func (c *rawClaims) scopes() ([]string, error) {
 		return nil, nil
 	}
 	var tokens []string
-	ok := eachString(c.scp, func(s string) { tokens = append(tokens, scopeTokens(s)...) })
-	if !ok {
-		return nil, errScopeType
+	err := scpStrings(c.scp, func(s string) error {
+		if !scopeList(s) {
+			return errScopeToken
+		}
+		tokens = append(tokens, scopeTokens(s)...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return tokens, nil
 }
@@ -292,20 +312,23 @@ func claimString(raw string, notString error) (string, error) {
 	return s, nil
 }
 
-// eachString calls fn with raw when it is a string, or with each element of
-// raw, an array of strings, each decoded; it reports false when raw is neither,
-// maybe after fn saw the elements before the fault.
-func eachString(raw string, fn func(s string)) bool {
+// scpStrings calls fn with raw when it is a string, or with each element of
+// raw, an array of strings, each decoded, until fn fails, and returns that
+// failure; a raw or an element that is neither fails with errScopeType.
+func scpStrings(raw string, fn func(s string) error) error {
 	if s, ok := jsonfast.DecodeString(raw); ok {
-		fn(s)
-		return true
+		return fn(s)
 	}
-	return jsonfast.IterateArray(raw, func(elem string) error {
-		s, ok := jsonfast.DecodeString(elem)
-		if !ok {
-			return errMalformedClaims
+	var failed error
+	walked := jsonfast.IterateArray(raw, func(elem string) error {
+		failed = errScopeType
+		if s, ok := jsonfast.DecodeString(elem); ok {
+			failed = fn(s)
 		}
-		fn(s)
-		return nil
-	}) == nil
+		return failed
+	})
+	if walked != nil && failed == nil {
+		return errScopeType
+	}
+	return failed
 }

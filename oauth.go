@@ -224,11 +224,11 @@ func newOAuthAuthenticator(oc *OAuthConfig, keys keyResolver) *oauthAuthenticato
 func invalidTokens() []*authError {
 	causes := []error{
 		errTokenTooLarge, errCriticalHeader, errNoKey, errAmbiguousKey, errSignature, errIDToken, errIssuer,
-		errAudience, errMissingExpiry, errNotYetValid, errIssuedInFuture, errSegments, errHeaderEncoding,
-		errPayloadEncoding, errSignatureEncoding, errNoAlg, errModeAlg, errAccessType, errNoAudience,
-		errAudienceType, errScopeType, errExpTime, errNbfTime, errIatTime, errHeaderShape, errAlgNotString,
-		errKidNotString, errTypNotString, errClaimsShape, errIssNotString, errSubNotString, errClientIDNotString,
-		errAzpNotString, errScopeNotString,
+		errAudience, errMissingExpiry, errMissingSubject, errNotYetValid, errIssuedInFuture, errSegments,
+		errHeaderEncoding, errPayloadEncoding, errSignatureEncoding, errNoAlg, errModeAlg, errAccessType,
+		errNoAudience, errAudienceType, errScopeType, errScopeToken, errSubjectValue, errExpTime, errNbfTime,
+		errIatTime, errHeaderShape, errAlgNotString, errKidNotString, errTypNotString, errClaimsShape,
+		errIssNotString, errSubNotString, errClientIDNotString, errAzpNotString, errScopeNotString,
 	}
 	refusals := make([]*authError, len(causes))
 	for i, cause := range causes {
@@ -282,8 +282,8 @@ func (a *oauthAuthenticator) tokenFailure(err error) *authError {
 func tokenText(err error) string {
 	for _, class := range [...]tokenError{
 		errMalformedToken, errUnsupportedAlg, errTokenType, errMalformedClaims, errTokenTooLarge, errCriticalHeader,
-		errNoKey, errAmbiguousKey, errSignature, errIDToken, errIssuer, errAudience, errMissingExpiry, errNotYetValid,
-		errIssuedInFuture,
+		errNoKey, errAmbiguousKey, errSignature, errIDToken, errIssuer, errAudience, errMissingExpiry,
+		errMissingSubject, errNotYetValid, errIssuedInFuture,
 	} {
 		if errors.Is(err, class) {
 			return string(class)

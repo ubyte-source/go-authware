@@ -21,8 +21,8 @@ type Identity struct {
 	peer    *x509.Certificate
 }
 
-// Subject returns the caller's subject, empty for a nil identity and when the
-// mode has none.
+// Subject returns the caller's subject, a header value that a Gate leaves
+// empty only in ModeNone; a nil identity has none.
 func (id *Identity) Subject() string {
 	if id == nil {
 		return ""
@@ -38,7 +38,7 @@ func (id *Identity) Mode() Mode {
 	return id.mode
 }
 
-// Scopes returns a copy of the granted scopes.
+// Scopes returns a copy of the granted scopes, each a scope token.
 func (id *Identity) Scopes() []string {
 	if id == nil {
 		return nil

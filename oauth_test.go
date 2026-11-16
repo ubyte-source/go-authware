@@ -298,6 +298,7 @@ func TestOAuthAuthenticatorValidateTokenRejects(t *testing.T) {
 			{"expired", f.sign(t, algES256, claimsWith(map[string]any{claimExp: testUnix - 3600})), ErrTokenExpired},
 			{"ID token", f.sign(t, algEdDSA, claimsWith(map[string]any{testClaimNonce: "n", claimScope: nil})),
 				errIDToken},
+			{"no subject", f.sign(t, algES384, claimsWith(map[string]any{claimSub: nil})), errMissingSubject},
 		}
 		for _, tc := range tests {
 			f.srv.hits.Store(0)
@@ -655,10 +656,7 @@ var tokenErrorLiteral = regexp.MustCompile(`tokenError\(("(?:[^"\\]|\\.)*")\)`)
 
 // minTokenErrors is how many tokenError constants the package declares at
 // least.
-const minTokenErrors = 15
-
-// errOther is an error that no classification knows.
-var errOther = errors.New("test: other")
+const minTokenErrors = 16
 
 func wrapError(err error) error {
 	return fmt.Errorf("detail: %w", err)
@@ -676,6 +674,7 @@ func FuzzOAuthAuthenticatorValidateToken(f *testing.F) {
 		claimAud: []string{"x", testMCPServer}, claimScp: []string{kidA}, testClaimNbf: testUnix,
 	}))))
 	f.Add(signRaw(f, algHS256, mac, `{"alg":"HS256"}`, mustJSON(f, claimsWith(map[string]any{claimIss: "x"}))))
+	f.Add(signToken(f, algHS256, mac, "", claimsWith(map[string]any{claimSub: nil})))
 	f.Add(signToken(f, algHS256, []byte(testLongSecret), "", testClaims()))
 	f.Add(signToken(f, algRS256, testRSAKey(), "", testClaims()))
 	oc := hmacOAuth()

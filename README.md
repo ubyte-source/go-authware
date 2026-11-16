@@ -99,9 +99,13 @@ fmt.Println(team, ok)
 `ClaimString`, `ClaimInt64`, `ClaimFloat64`, `ClaimBool` and `Claims`
 read the token claims in `ModeOAuth`. An Identity is immutable. Claims are
 kept as an owned copy of the JWT payload and decoded on demand. The subject
-is `sub`, else `client_id`, else `azp`; static modes report `static-bearer`
-or `static-apikey`, and mTLS the matched common or distinguished name; a pin
-reports the DN of a verified chain, else `sha256/` and the base64 pin.
+is a header value, with no control byte but an inner tab and no space or
+tab at either end, and the scopes are scope tokens. A token names its
+subject in the first non-empty of `sub`, `client_id` and `azp`; static
+modes report `static-bearer` or `static-apikey`, and mTLS the matched
+common or distinguished name; a pin reports the DN that a verified chain
+proves and a header carries, else `sha256/` and the base64 pin. Only
+`ModeNone` leaves the subject empty.
 
 ### Failures
 
@@ -173,10 +177,15 @@ accepted only when all of these hold:
 - `exp` is required and the token is expired once now is past
   `exp + ClockSkew` (default 30s); `nbf` and `iat` may not lie beyond
   now plus the skew. Time claims are JSON numbers from 0 to 2^53.
+- `sub`, `client_id` or `azp` holds a non-empty string: the first that does
+  names the subject and is a header value, with no control byte but an
+  inner tab and no space or tab at either end.
 - ID tokens are refused: `at_hash`, `c_hash`, or `nonce` without any of
   `scope`, `scp` or `roles`.
-- Every `RequiredScopes` entry is granted by `scope` (space-separated) or
-  `scp` (string or array); otherwise 403 `insufficient_scope`.
+- Every field of `scope` (space-separated), or else of `scp` (such a string
+  or an array of them), is a scope token: visible ASCII but `"` and `\`.
+  Every `RequiredScopes` entry is among them; otherwise 403
+  `insufficient_scope`.
 
 **Keys.** A JWKS keeps its usable keys and skips the others: unknown
 `kty` or curve, RSA outside 2048 to 8192 bits or with an even exponent or
@@ -324,28 +333,31 @@ gate, err := authware.New(&authware.Config{
 A subject entry containing `=` is a distinguished name and any other entry a
 common name, each written as `pkix.Name.String` renders it, escapes included,
 except that a value of a dotted type is `#` and the hex of its DER on every Go
-version: `svc\;blue` admits the common name `svc;blue`, and `New` refuses an
-entry that is never rendered, such as `CN=a, O=b`, `cn=a,o=b` or `O=b,CN=a` for
-`CN=a,O=b`. A subject that repeats its common name or serial number, of which
-`pkix.Name` keeps only the last, matches no entry. Subjects match only when the
-TLS layer verified the chain (`ClientAuth: tls.RequireAndVerifyClientCert`), since
-anyone can self-sign a subject. SPKI pins (SHA-256 of the SubjectPublicKeyInfo, 32
-bytes each) bind the key itself and also admit unverified chains; a pin reports
-the DN of a verified chain, else `sha256/` followed by the base64 pin, never the
-unproven DN. A missing or refused certificate gets 403 without a challenge. The
-certificate is available as `Identity.PeerCertificate()`.
+version: `svc\;blue` admits the common name `svc;blue`, and `New` refuses an entry
+that is never rendered, such as `CN=a, O=b`, `cn=a,o=b` or `O=b,CN=a` for
+`CN=a,O=b`, and one that admits no header value, such as `svc\ `, whose common
+name ends in a space. A subject that repeats its common name or serial number, of
+which `pkix.Name` keeps only the last, matches no entry. Subjects match only when
+the TLS layer verified the chain (`ClientAuth: tls.RequireAndVerifyClientCert`),
+since anyone can self-sign a subject. SPKI pins (SHA-256 of the
+SubjectPublicKeyInfo, 32 bytes each) bind the key itself and also admit unverified
+chains. A pin reports the DN of its certificate when a verified chain proves it,
+the subject repeating neither its common name nor its serial number, and the DN is
+a header value; else `sha256/` followed by the base64 pin, never an unproven DN. A
+missing or refused certificate gets 403 without a challenge. The certificate is
+available as `Identity.PeerCertificate()`.
 
 ### nginx auth_request
 
 `Gate.CheckHandler()` serves the nginx
 [auth_request](https://nginx.org/en/docs/http/ngx_http_auth_request_module.html)
-protocol: 200 with `X-Auth-Subject` (the identity's subject, so the pin form for a pin
-without a verified chain), `X-Auth-Method` and, for an identity with scopes,
-`X-Auth-Scopes`, or the challenge (403 in a mode without one, 503 with `Retry-After`
-while the keys are unavailable). Responses are `Cache-Control: no-store`, and identity
-values have control bytes blanked so a token cannot inject header lines. In `ModeOAuth`
-the challenge names the metadata of the path in `X-Original-URI`, or without that
-header the bare metadata path, which `Mount` serves for its first endpoint.
+protocol: 200 with `X-Auth-Subject`, `X-Auth-Method` and, for an identity with scopes,
+`X-Auth-Scopes`, space-separated, or the challenge (403 in a mode without one, 503 with
+`Retry-After` while the keys are unavailable). Responses are `Cache-Control: no-store`.
+The subject, a header value, and the scopes, scope tokens, are sent as the identity
+holds them: a header line carries both unchanged. In `ModeOAuth` the challenge names
+the metadata of the path in `X-Original-URI`, or without that header the bare metadata
+path, which `Mount` serves for its first endpoint.
 
 ```go
 mux.Handle("/auth/check", gate.CheckHandler())

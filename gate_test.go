@@ -1,6 +1,7 @@
 package authware
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,11 +9,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ubyte-source/go-authware/v2/secret"
@@ -23,6 +26,7 @@ import (
 // decoded token's text, and a token whose header is no base64url.
 const (
 	headerSubject      = "X-Auth-Subject"
+	headerScopes       = "X-Auth-Scopes"
 	headerMethod       = "X-Auth-Method"
 	headerCacheControl = "Cache-Control"
 	testEndpoint       = "/mcp"
@@ -174,6 +178,82 @@ func TestGateMiddlewareStoresIdentity(t *testing.T) {
 	}
 }
 
+// TestGateMiddlewareRefusesTokenWithoutSubject challenges a signed token that
+// carries no sub, client_id or azp and keeps it from next.
+func TestGateMiddlewareRefusesTokenWithoutSubject(t *testing.T) {
+	h := mustGate(t, validOAuth()).Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("next reached by a token without a subject, want the challenge")
+	}))
+	claims := claimsWith(map[string]any{claimSub: nil, claimExp: time.Now().Add(time.Hour).Unix()})
+	r := newReq(t, http.MethodGet, pathRoot, http.NoBody)
+	r.Header.Set(headerAuthorization, "Bearer "+signToken(t, algHS256, []byte(testLongSecret), "", claims))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	want := `Bearer realm="restricted", error="invalid_token", error_description="missing subject claim", ` +
+		`resource_metadata="http://example.com/.well-known/oauth-protected-resource"`
+	if w.Code != http.StatusUnauthorized || w.Header().Get(headerChallenge) != want {
+		t.Fatalf("Middleware = %d %q, want 401 %q", w.Code, w.Header().Get(headerChallenge), want)
+	}
+}
+
+// checkAnswer is the answer of the check endpoint as a connection carries it:
+// the status, the subject and the scopes, and whether each header is sent.
+type checkAnswer struct {
+	subject, scopes         string
+	status                  int
+	subjectSent, scopesSent bool
+}
+
+// wireAnswer serves the check of token through h and returns its answer as
+// net/http writes the header to a connection and net/textproto reads it.
+func wireAnswer(t *testing.T, h http.Handler, token string) checkAnswer {
+	t.Helper()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, bearerRequest(t, token))
+	var wire strings.Builder
+	if err := w.Header().Write(&wire); err != nil {
+		t.Fatalf("Write = %v, want the header lines", err)
+	}
+	hd, err := textproto.NewReader(bufio.NewReader(strings.NewReader(wire.String() + "\r\n"))).ReadMIMEHeader()
+	if err != nil {
+		t.Fatalf("ReadMIMEHeader(%q) = %v, want the header", wire.String(), err)
+	}
+	return checkAnswer{
+		subject: hd.Get(headerSubject), scopes: hd.Get(headerScopes), status: w.Code,
+		subjectSent: hd[headerSubject] != nil, scopesSent: hd[headerScopes] != nil,
+	}
+}
+
+// FuzzGateCheckHandler answers the check of a token of any subject and scope
+// at testUnix: an identity referenceClaims accepts arrives unchanged, and a
+// token it refuses is challenged and names nobody.
+func FuzzGateCheckHandler(f *testing.F) {
+	for _, seed := range [][2]string{
+		{testUser, testReadW}, {" user", testRead}, {"a\tb", "a\tb"}, {testUser, "x\r\nadmin"}, {"caf\u00e9", ""},
+		{"", testRead}, {"user ", `a"b`}, {"a\nb", " "}, {"a\tb", testRead},
+	} {
+		f.Add(seed[0], seed[1])
+	}
+	h := mustGate(f, validOAuth()).CheckHandler()
+	f.Fuzz(func(t *testing.T, subject, scope string) {
+		synctest.Test(t, func(t *testing.T) {
+			time.Sleep(time.Until(time.Unix(testUnix, 0)))
+			payload := mustJSON(t, claimsWith(map[string]any{claimSub: subject, claimScope: scope}))
+			got := wireAnswer(t, h, signRaw(t, algHS256, []byte(testLongSecret), `{"alg":"HS256"}`, payload))
+			want := checkAnswer{status: http.StatusUnauthorized}
+			if c, err := referenceClaims(payload); err == nil {
+				want = checkAnswer{
+					subject: c.subject, scopes: strings.Join(c.scopes, " "), status: http.StatusOK,
+					subjectSent: true, scopesSent: len(c.scopes) > 0,
+				}
+			}
+			if got != want {
+				t.Fatalf("check answer to %s = %+v, want %+v", payload, got, want)
+			}
+		})
+	})
+}
+
 // TestGateKeysUnavailable answers, from Middleware and CheckHandler, 503 with
 // Retry-After and without a challenge while the keys are unavailable.
 func TestGateKeysUnavailable(t *testing.T) {
@@ -203,7 +283,9 @@ func TestGateMiddlewareKeyRefetchFails(t *testing.T) {
 	srv := newJWKSServer(t, jwksDocument(t, publicJWK(t, key, map[string]any{memberKid: "a"})))
 	h := mustGate(t, &Config{Mode: ModeOAuth, HTTPClient: srv.client(), OAuth: OAuthConfig{Issuer: testIssuerURL,
 		Audience: "a", JWKSURL: testJWKSURL}}).Middleware(http.NotFoundHandler())
-	claims := map[string]any{claimIss: testIssuerURL, claimAud: "a", claimExp: time.Now().Add(time.Hour).Unix()}
+	claims := map[string]any{
+		claimIss: testIssuerURL, claimAud: "a", claimSub: testUser, claimExp: time.Now().Add(time.Hour).Unix(),
+	}
 	for _, st := range []struct {
 		kid   string
 		code  int
@@ -360,15 +442,15 @@ func TestGateRequireStaticModes(t *testing.T) {
 }
 
 func TestGateCheckHandler(t *testing.T) {
-	g := mustGate(t, &Config{Mode: ModeMTLS, MTLS: MTLSConfig{AllowedSubjects: []string{"evil\r\nSet-Cookie: x"}}})
+	const subject = "svc one"
+	g := mustGate(t, &Config{Mode: ModeMTLS, MTLS: MTLSConfig{AllowedSubjects: []string{subject}}})
 	h := g.CheckHandler()
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, verifiedMTLSRequest(t, testCert("evil\r\nSet-Cookie: x")))
+	h.ServeHTTP(w, verifiedMTLSRequest(t, testCert(subject)))
 	hd := w.Header()
-	if w.Code != http.StatusOK || hd.Get(headerCacheControl) != "no-store" ||
-		hd.Get(headerSubject) != "evil  Set-Cookie: x" || hd.Get(headerMethod) != "mtls" ||
-		hd.Values("X-Auth-Scopes") != nil {
-		t.Fatalf("CheckHandler = %d %v, want 200 no-store with the blanked subject and no scopes", w.Code, hd)
+	if w.Code != http.StatusOK || hd.Get(headerCacheControl) != "no-store" || hd.Get(headerSubject) != subject ||
+		hd.Get(headerMethod) != "mtls" || hd.Values(headerScopes) != nil {
+		t.Fatalf("CheckHandler = %d %v, want 200 no-store with the subject %s and no scopes", w.Code, hd, subject)
 	}
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, newReq(t, http.MethodGet, pathRoot, http.NoBody))
@@ -453,19 +535,58 @@ func TestGateCheckHandlerDenyAllocs(t *testing.T) {
 	})
 }
 
+// TestGateCheckHandlerScopes answers the scopes a token grants, and challenges
+// a token whose scope would break the header line without naming its caller.
 func TestGateCheckHandlerScopes(t *testing.T) {
 	h := mustGate(t, validOAuth()).CheckHandler()
-	for scope, want := range map[string]string{testReadW: testReadW, "read\r\nSet-Cookie:x": "read  Set-Cookie:x"} {
-		r := newReq(t, http.MethodGet, pathRoot, http.NoBody)
-		r.Header.Set(headerAuthorization, "Bearer "+oauthToken(t, scope))
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		hd := w.Header()
-		if w.Code != http.StatusOK || hd.Get("X-Auth-Scopes") != want || hd.Get(headerSubject) != testUser ||
-			hd.Get(headerMethod) != string(ModeOAuth) || hd.Values("Set-Cookie") != nil {
-			t.Fatalf("CheckHandler(scope %q) = %d %v, want 200 with scopes %q", scope, w.Code, hd, want)
+	r := bearerRequest(t, oauthToken(t, testReadW))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	hd := w.Header()
+	if w.Code != http.StatusOK || hd.Get(headerScopes) != testReadW || hd.Get(headerSubject) != testUser ||
+		hd.Get(headerMethod) != string(ModeOAuth) {
+		t.Fatalf("CheckHandler(scope %q) = %d %v, want 200 with the scopes of %s", testReadW, w.Code, hd, testUser)
+	}
+	checkOwnValues(t, hd, headerCacheControl, headerSubject, headerMethod, headerScopes)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, bearerRequest(t, oauthToken(t, "read\r\nSet-Cookie:x")))
+	hd = w.Header()
+	if w.Code != http.StatusUnauthorized || hd.Values(headerSubject) != nil || hd.Values(headerScopes) != nil ||
+		hd.Values("Set-Cookie") != nil {
+		t.Fatalf("CheckHandler(scope with a line break) = %d %v, want 401 without identity headers", w.Code, hd)
+	}
+}
+
+// TestGateCheckHandlerCarriesTheIdentity reads the check answer from a
+// connection: the subject and the scopes arrive as the identity holds them.
+func TestGateCheckHandlerCarriesTheIdentity(t *testing.T) {
+	g := mustGate(t, validOAuth())
+	srv := httptest.NewServer(g.CheckHandler())
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct{ subject, scope string }{
+		{"user@example.com", "read"}, {"a b\tc", "read:all !#[]~"}, {"caf\u00e9 \u00a0", "a/b.c-d_e"},
+		{`q"uo\te`, "urn:x:y https://api.example/read"},
+	} {
+		claims := claimsWith(map[string]any{
+			claimSub: tc.subject, claimScope: tc.scope, claimExp: time.Now().Add(time.Hour).Unix(),
+		})
+		r, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+		if err != nil {
+			t.Fatalf("NewRequest = %v, want a request", err)
 		}
-		checkOwnValues(t, hd, headerCacheControl, headerSubject, headerMethod, "X-Auth-Scopes")
+		r.Header.Set(headerAuthorization, "Bearer "+signToken(t, algHS256, []byte(testLongSecret), "", claims))
+		resp, err := srv.Client().Do(r)
+		if err != nil {
+			t.Fatalf("Do = %v, want an answer", err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("Close = %v, want nil", err)
+		}
+		if got := resp.Header; resp.StatusCode != http.StatusOK || got.Get(headerSubject) != tc.subject ||
+			got.Get(headerScopes) != tc.scope {
+			t.Errorf("check answer for %q granted %q = %d, subject %q, scopes %q; want them unchanged",
+				tc.subject, tc.scope, resp.StatusCode, got.Get(headerSubject), got.Get(headerScopes))
+		}
 	}
 }
 
@@ -933,6 +1054,18 @@ func TestGateAuthenticateAllocs(t *testing.T) {
 		{"alg no string", unsigned(`{"alg":1}`), validOAuth(), decodedTextAllocs, ErrInvalidCredentials},
 		{"claims no JSON object", signed(`{"iss":`), validOAuth(), decodedTextAllocs, ErrInvalidCredentials},
 		{"iss no string", signed(`{"iss":1}`), validOAuth(), decodedTextAllocs, ErrInvalidCredentials},
+		{"no subject", signed(mustJSON(t, claimsWith(map[string]any{
+			claimSub: nil, claimExp: time.Now().Add(time.Hour).Unix(),
+		}))), validOAuth(), decodedTextAllocs, ErrInvalidCredentials},
+		{"subject no header value", signed(mustJSON(t, claimsWith(map[string]any{
+			claimSub: " u", claimExp: time.Now().Add(time.Hour).Unix(),
+		}))), validOAuth(), decodedTextAllocs, ErrInvalidCredentials},
+		{"scope no scope token", signed(mustJSON(t, claimsWith(map[string]any{
+			claimScope: "caf\u00e9", claimExp: time.Now().Add(time.Hour).Unix(),
+		}))), validOAuth(), decodedTextAllocs, ErrInvalidCredentials},
+		{"scp no scope token", signed(mustJSON(t, claimsWith(map[string]any{
+			claimScope: nil, claimScp: "caf\u00e9", claimExp: time.Now().Add(time.Hour).Unix(),
+		}))), validOAuth(), decodedTextAllocs, ErrInvalidCredentials},
 		{"untyped token", oauthToken(t, testRead), typed, decodedTextAllocs, ErrInvalidCredentials},
 		{"expired token", expired, validOAuth(), decodedTextAllocs, ErrTokenExpired},
 		{"keys unavailable", signToken(t, algRS256, []byte(testLongSecret), "k", testClaims()),
