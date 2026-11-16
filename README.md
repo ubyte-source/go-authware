@@ -180,8 +180,11 @@ accepted only when all of these hold:
 - `sub`, `client_id` or `azp` holds a non-empty string: the first that does
   names the subject and is a header value, with no control byte but an
   inner tab and no space or tab at either end.
-- ID tokens are refused: `at_hash`, `c_hash`, or `nonce` without any of
-  `scope`, `scp` or `roles`.
+- ID tokens are refused by their marks: `at_hash`, `c_hash`, or `nonce`
+  without any of `scope`, `scp` or `roles`. An ID token without a mark
+  carries the ID of its client as `aud` and neither `scope` nor `scp`, so
+  an `Audience` other than that ID, a `RequiredScopes` entry or
+  `RequireAccessTokenType` refuses it.
 - Every field of `scope` (space-separated), or else of `scp` (such a string
   or an array of them), is a scope token: visible ASCII but `"` and `\`.
   Every `RequiredScopes` entry is among them; otherwise 403
@@ -281,10 +284,13 @@ any token that is not an OAuth scope-token (visible ASCII but `"` and `\`)
 are refused with `invalid_scope`. `/authorize` always asks for `openid
 offline_access` plus the requested scopes, or `RequiredScopes` when none
 are requested, so `New` refuses a facade whose `RequiredScopes` holds a URI
-scope outside `ScopePrefix`. `/token` qualifies `scope` only when present.
-`resource` is `UpstreamResource`, or absent when that is empty. `New`
-refuses a `ScopePrefix` that is not a scope token and an `UpstreamResource`
-that is not an absolute URI without a fragment.
+scope outside `ScopePrefix`. The issuer answers `openid` with an ID token
+whose `aud` is `ClientID`, so `New` also refuses a facade whose `ClientID`
+is the `Audience` unless `RequiredScopes` or `RequireAccessTokenType` is
+set. `/token` qualifies `scope` only when present. `resource` is
+`UpstreamResource`, or absent when that is empty. `New` refuses a
+`ScopePrefix` that is not a scope token and an `UpstreamResource` that is
+not an absolute URI without a fragment.
 
 The upstream endpoints come from the issuer metadata the keys use,
 refreshed after `KeysCacheTTL` and served for up to 24h while discovery

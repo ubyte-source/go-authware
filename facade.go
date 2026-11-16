@@ -53,7 +53,8 @@ var errUpstreamEndpoint = errors.New("unusable upstream endpoint")
 // FacadeConfig enables the authorization server facade when ClientID is set.
 type FacadeConfig struct {
 	// ClientID (AUTH_OAUTH_FACADE_CLIENT_ID) is the client registered upstream
-	// on behalf of every client of the facade.
+	// on behalf of every client of the facade; when it is also the Audience,
+	// RequiredScopes or RequireAccessTokenType must be set.
 	ClientID string
 	// ClientSecret (AUTH_OAUTH_FACADE_CLIENT_SECRET) authenticates ClientID
 	// upstream; empty means a public client.

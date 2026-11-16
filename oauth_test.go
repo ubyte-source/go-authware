@@ -72,6 +72,8 @@ func TestOAuthConfigValidate(t *testing.T) {
 		{"facade servers", func(o *OAuthConfig) {
 			o.Facade.ClientID, o.Resource.AuthorizationServers = testClientID, []string{testIssuerURL}
 		}, "authorization servers and facade client ID are exclusive"},
+		{"facade audience", func(o *OAuthConfig) { o.Facade.ClientID = o.Audience },
+			"oauth audience equal to the facade client ID needs required scopes or the at+jwt type"},
 		{"facade uri scope", func(o *OAuthConfig) {
 			o.Facade.ClientID, o.RequiredScopes = testClientID, []string{"https://api.example.com/read"}
 		}, `scope "https://api.example.com/read" names a resource outside`},
@@ -85,6 +87,33 @@ func TestOAuthConfigValidate(t *testing.T) {
 				t.Fatalf("prepare = %+v, %v, want nil, ErrInvalidConfig with %q", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestOAuthConfigValidateFacadeAudience accepts the facade client ID as the
+// audience with a required scope or the at+jwt type, and any other audience
+// without; a config with neither audience nor facade names only the audience.
+func TestOAuthConfigValidateFacadeAudience(t *testing.T) {
+	for name, edit := range map[string]func(o *OAuthConfig){
+		"scope":  func(o *OAuthConfig) { o.Facade.ClientID, o.RequiredScopes = o.Audience, []string{testRead} },
+		"at+jwt": func(o *OAuthConfig) { o.Facade.ClientID, o.RequireAccessTokenType = o.Audience, true },
+		"scope and at+jwt": func(o *OAuthConfig) {
+			o.Facade.ClientID, o.RequiredScopes, o.RequireAccessTokenType = o.Audience, []string{testRead}, true
+		},
+		"other audience": func(o *OAuthConfig) { o.Facade.ClientID = testClientID },
+	} {
+		cfg := validOAuth()
+		edit(&cfg.OAuth)
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate(%s) = %v, want nil", name, err)
+		}
+	}
+	cfg := validOAuth()
+	cfg.OAuth.Audience = ""
+	err := cfg.Validate()
+	if !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), "oauth audience is required") ||
+		strings.Contains(err.Error(), "facade") {
+		t.Errorf("Validate(no audience, no facade) = %v, want only the required audience", err)
 	}
 }
 

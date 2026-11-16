@@ -28,7 +28,8 @@ go-authware sits between an HTTP server and untrusted clients, and calls
 identity providers (JWKS, discovery, token endpoints) and cloud metadata
 services. It defends against:
 
-- Forged, expired, mis-addressed or ID tokens presented as access tokens.
+- Forged, expired or mis-addressed tokens, and ID tokens presented as access
+  tokens, by their marks or by a setting that tells them apart.
 - Algorithm confusion (`alg=none`, HMAC keyed with a public key, alg and
   key type mismatch) and key injection through JOSE headers.
 - Hostile or compromised discovery documents steering fetches or
@@ -87,7 +88,13 @@ services. It defends against:
 - **Claim policy.** `iss` exact, `aud` required, `exp` required with
   `ClockSkew`, `nbf` and `iat` bounded, time claims numbers from 0 to 2^53,
   `at_hash` or `c_hash`, or `nonce` without any of `scope`, `scp` or
-  `roles`, refused as ID tokens, `RequireAccessTokenType` for `at+jwt`.
+  `roles`, refused as ID tokens, `RequireAccessTokenType` for `at+jwt`. An
+  ID token without those marks carries the ID of its client as `aud` and
+  neither `scope` nor `scp`: an `Audience` other than that ID, a
+  `RequiredScopes` entry or `RequireAccessTokenType` refuses it. The
+  facade's clients receive ID tokens of its `ClientID`, so `New` refuses
+  that ID as `Audience` unless `RequiredScopes` or `RequireAccessTokenType`
+  is set.
 - **Subject and scopes.** Every identity a Gate returns outside `ModeNone`
   has a subject that is a header value, with no control byte but an inner
   tab and no space or tab at either end, and scopes that are scope tokens. A

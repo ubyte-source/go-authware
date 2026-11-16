@@ -91,7 +91,8 @@ func (o *OAuthConfig) verifierInUse() bool {
 		o.RequireAccessTokenType
 }
 
-// validate checks the claims, the key source, the durations and the metadata.
+// validate checks the claims, the key source, the durations, the metadata and
+// the facade.
 func (o *OAuthConfig) validate(p *problems.List) {
 	if o.Issuer == "" {
 		p.Addf("oauth issuer is required")
@@ -106,6 +107,16 @@ func (o *OAuthConfig) validate(p *problems.List) {
 	p.NonNegative("oauth fetch timeout", o.FetchTimeout)
 	o.validateAdvertised(p)
 	o.Facade.validate(p, o.RequiredScopes)
+	o.validateFacadeAudience(p)
+}
+
+// validateFacadeAudience requires scopes or the at+jwt type when the audience
+// is the facade client ID: the ID tokens the facade relays carry it too.
+func (o *OAuthConfig) validateFacadeAudience(p *problems.List) {
+	if o.Facade.ClientID != "" && o.Facade.ClientID == o.Audience && len(o.RequiredScopes) == 0 &&
+		!o.RequireAccessTokenType {
+		p.Addf("oauth audience equal to the facade client ID needs required scopes or the at+jwt type")
+	}
 }
 
 // validateKeys checks the verification key source and the URLs it fetches.
